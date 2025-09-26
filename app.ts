@@ -1,20 +1,22 @@
-import bodyParser from "body-parser";
 import express from "express";
+import path from "path";
 import { router as auth } from "./controllers/auth";
-import { router as draw } from "./controllers/draw";
 import { router as register } from "./controllers/register";
-import { router as kicket } from "./controllers/tikets";
-import { router as wallet} from "./controllers/wallets";
-import { router as users} from "./controllers/users";
-import {router as dataadmin} from "./controllers/dataadmin";
+import { router as rider } from "./controllers/rider";
+import { router as senditem } from "./controllers/senditem";
+import { router as shipments } from "./controllers/shipments";
+import { router as users } from "./controllers/users";
 export const app = express();
-app.use(express.json());
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use("/dataadmin", dataadmin);
+app.use(express.json({ limit: "80mb" }));
+app.use(express.urlencoded({ extended: true, limit: "80mb" }));
+app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+app.use("/senditem", senditem);
 app.use("/users", users);
-app.use("/wallets", wallet);
-app.use("/tickets", kicket);
 app.use("/login", auth);
 app.use("/register", register);
-app.use("/draws", draw);
+app.use("/shipments", shipments);
+app.use("/riders", rider);
+
+app.use((req, res) => {
+    res.status(404).json({ message: "Not Found" });
+});
