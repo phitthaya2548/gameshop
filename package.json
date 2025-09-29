@@ -25,7 +25,8 @@
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",
     "mysql2": "^3.15.0",
-    "prisma": "^6.11.1"
+    "prisma": "^6.11.1",
+    "tsx": "^4.20.6"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
