@@ -8,11 +8,6 @@
     "strict": true,
     "types": ["node"],
 "verbatimModuleSyntax": false,
-  },
-  "include": [
-    "**/*.ts"  // คอมไพล์ทุกไฟล์ .ts
-  ],
-  "exclude": [
-    "node_modules"
-  ]
+
+  }
 }
