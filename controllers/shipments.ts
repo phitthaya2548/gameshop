@@ -1,7 +1,7 @@
 // routes/shipments.ts
 import express from "express";
+import { ResultSetHeader } from "mysql2";
 import { conn } from "../db";
-
 export const router = express.Router();
 
 /* ----------------------- helpers ----------------------- */
@@ -197,7 +197,7 @@ router.get("/:id", async (req, res) => {
       return res.status(400).json({ success: false, message: "invalid_id" });
     }
 
-    // คิวรี: รูปล่าสุด + ที่อยู่ + ผู้ส่ง/ผู้รับ + avatar
+    // คิวรี: รูปล่าสุด + ที่อยู่ + ผู้ส่ง/ผู้รับ + avatar และไรเดอร์
     const [rows] = await conn.promise().query(
       `
       SELECT
@@ -231,13 +231,19 @@ router.get("/:id", async (req, res) => {
         us.profile_image AS send_avatar,
         ur.name          AS recv_name,
         ur.phone_number  AS recv_phone,
-        ur.profile_image AS recv_avatar
+        ur.profile_image AS recv_avatar,
+
+        /* ไรเดอร์ */
+        r.name           AS rider_name,
+        r.phone_number   AS rider_phone,
+        r.profile_image  AS rider_avatar,
+        r.license_plate  AS license_plate
 
       FROM Shipment s
 
       /* รูปล่าสุดต่อ shipment */
       LEFT JOIN (
-        SELECT sp1.*
+        SELECT sp1.* 
         FROM Shipment_Photo sp1
         JOIN (
           SELECT shipment_id, MAX(uploaded_at) AS max_up
@@ -254,6 +260,9 @@ router.get("/:id", async (req, res) => {
       LEFT JOIN User us ON us.user_id = s.sender_id
       LEFT JOIN User ur ON ur.user_id = s.receiver_id
 
+      /* join ไรเดอร์ */
+      LEFT JOIN Rider r ON r.rider_id = s.rider_id
+
       WHERE s.shipment_id = ?
       LIMIT 1
       `,
@@ -269,6 +278,7 @@ router.get("/:id", async (req, res) => {
       "last_photo_url",
       "send_avatar",
       "recv_avatar",
+      "rider_avatar",
     ]) as any[];
 
     const r = fixed[0];
@@ -313,6 +323,15 @@ router.get("/:id", async (req, res) => {
           lat: r.recv_gps_lat ?? "",
           lng: r.recv_gps_lng ?? "",
         },
+      },
+
+      // ข้อมูลของไรเดอร์
+      rider: {
+        id: r.rider_id,
+        name: r.rider_name ?? "",
+        phone: r.rider_phone ?? "",
+        avatar: r.rider_avatar || "",
+        license_plate: r.license_plate ?? "",
       },
     };
 
@@ -436,5 +455,51 @@ router.get("/", async (req, res) => {
     return res
       .status(500)
       .json({ success: false, message: "Internal Server Error" });
+  }
+});
+router.post("/accept", async (req, res) => {
+  const { rider_id, shipment_id } = req.body;
+
+  if (!rider_id || !shipment_id) {
+    return res.status(400).json({ success: false, message: "missing_fields" });
+  }
+
+  try {
+    // Check if the rider already has an accepted or in-progress shipment
+    const [existingShipment] = await conn
+      .promise()
+      .query(
+        `SELECT * FROM Shipment WHERE rider_id = ? AND status IN ('2', '3') LIMIT 1`,
+        [rider_id]
+      );
+
+    // Check if the result has rows
+    if ((existingShipment as any[]).length > 0) {
+      // Type casting to handle result as array
+      return res.status(400).json({
+        success: false,
+        message: "rider_has_ongoing_shipment",
+      });
+    }
+
+    // Proceed to accept the shipment if the rider has no ongoing shipment
+    const [result] = await conn.promise().query<ResultSetHeader>(
+      `UPDATE Shipment 
+      SET status = '2', rider_id = ? 
+      WHERE shipment_id = ? AND status = '1'`,
+      [rider_id, shipment_id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "shipment_not_found_or_already_taken",
+      });
+    }
+
+    return res.json({ success: true, message: "shipment_accepted" });
+  } catch (e) {
+    console.error("Error accepting shipment:", e);
+    return res.status(500).json({ success: false, message: "server_error" });
   }
 });

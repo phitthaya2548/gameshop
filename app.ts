@@ -6,6 +6,7 @@ import { router as rider } from "./controllers/rider";
 import { router as senditem } from "./controllers/senditem";
 import { router as shipments } from "./controllers/shipments";
 import { router as users } from "./controllers/users";
+import { router as rideraccepted } from "./controllers/rideraccepted";
 export const app = express();
 app.use(express.json({ limit: "80mb" }));
 app.use(express.urlencoded({ extended: true, limit: "80mb" }));
@@ -16,7 +17,7 @@ app.use("/login", auth);
 app.use("/register", register);
 app.use("/shipments", shipments);
 app.use("/riders", rider);
-
+app.use("/riders/accepted", rideraccepted);
 app.use((req, res) => {
     res.status(404).json({ message: "Not Found" });
 });

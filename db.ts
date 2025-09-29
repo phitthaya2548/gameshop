@@ -9,3 +9,12 @@ export const conn = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
 });
+// export const conn = mysql.createPool({
+//   host: "localhost",       // เดิมใส่ "root" ผิดช่อง ควรเป็น localhost หรือ 127.0.0.1
+//   port: 3306,
+//   user: "root",
+//   password: "",   // ถ้าไม่มีรหัสผ่าน เว้นเป็น "" (ไม่แนะนำ)
+//   database: "delivery",
+//   waitForConnections: true,
+//   connectionLimit: 10,
+// });
