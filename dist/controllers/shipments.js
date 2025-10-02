@@ -304,7 +304,6 @@ exports.router.get("/:id", async (req, res) => {
         return res.status(500).json({ success: false, message: "server_error" });
     }
 });
-/** GET /shipments — รายการ "ว่างรับได้": status=1 และ rider_id IS NULL */
 exports.router.get("/", async (req, res) => {
     try {
         const host = req.hostPrefix;

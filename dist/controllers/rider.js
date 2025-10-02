@@ -92,7 +92,7 @@ exports.router.post("/location", async (req, res) => {
                 .status(400)
                 .json({ success: false, message: "gps_lat/gps_lng required" });
         }
-        await db_1.conn.promise().query(`INSERT INTO rider_location (rider_id, gps_lat, gps_lng)
+        await db_1.conn.promise().query(`INSERT INTO Rider_Location (rider_id, gps_lat, gps_lng)
        VALUES (?, ?, ?)
        ON DUPLICATE KEY UPDATE
          gps_lat = VALUES(gps_lat),
