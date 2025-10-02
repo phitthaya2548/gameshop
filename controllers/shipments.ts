@@ -342,7 +342,7 @@ router.get("/:id", async (req, res) => {
   }
 });
 
-/** GET /shipments — รายการ "ว่างรับได้": status=1 และ rider_id IS NULL */
+
 router.get("/", async (req, res) => {
   try {
     const host = (req as any).hostPrefix as string;

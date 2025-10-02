@@ -97,7 +97,7 @@ router.post("/location", async (req, res) => {
     }
 
     await conn.promise().query(
-      `INSERT INTO rider_location (rider_id, gps_lat, gps_lng)
+      `INSERT INTO Rider_Location (rider_id, gps_lat, gps_lng)
        VALUES (?, ?, ?)
        ON DUPLICATE KEY UPDATE
          gps_lat = VALUES(gps_lat),
