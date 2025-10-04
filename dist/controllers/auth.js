@@ -7,64 +7,54 @@ exports.router = void 0;
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const express_1 = __importDefault(require("express"));
 const db_1 = require("../db");
+const jws_1 = require("../middlewares/jws");
+const upload_1 = require("./upload");
 exports.router = express_1.default.Router();
 exports.router.post("/", async (req, res) => {
     try {
-        const { phone_number, password } = req.body;
-        if (!phone_number?.trim() || !password?.trim()) {
+        const { email, password } = req.body ?? {};
+        if (typeof email !== "string" || typeof password !== "string") {
             return res
                 .status(400)
-                .json({ message: "phone_number and password are required" });
+                .json({ ok: false, message: "กรอกอีเมลและรหัสผ่าน" });
         }
-        const p = db_1.conn.promise();
-        const phone = phone_number.trim();
-        // --- 1) หาในตาราง User ---
-        const [urows] = await p.query(`SELECT user_id, phone_number, password, name, profile_image
-       FROM User
-       WHERE phone_number = ? LIMIT 1`, [phone]);
-        if (urows.length > 0) {
-            const u = urows[0];
-            const ok = await bcryptjs_1.default.compare(password, String(u.password));
-            if (!ok)
-                return res.status(401).json({ message: "Invalid credentials" });
-            return res.json({
-                success: true,
-                role: "USER",
-                profile: {
-                    id: u.user_id,
-                    phone_number: u.phone_number,
-                    name: u.name,
-                    profile_image: u.profile_image,
-                },
-            });
+        const [[user]] = await db_1.conn.query(`SELECT
+         id,
+         username,
+         email,
+         password_hash AS passwordHash,
+         role,
+         avatar_url    AS avatarUrl,       -- ✅ alias เป็น camelCase
+         wallet_balance AS walletBalance   -- ✅ alias เป็น camelCase
+       FROM users
+       WHERE email = ?
+       LIMIT 1`, [email.toLowerCase()]);
+        if (!user) {
+            return res
+                .status(401)
+                .json({ ok: false, message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
         }
-        // --- 2) ไม่เจอใน User -> หาใน Rider ---
-        const [rrows] = await p.query(`SELECT rider_id, phone_number, password, name, profile_image, vehicle_image, license_plate
-       FROM Rider
-       WHERE phone_number = ? LIMIT 1`, [phone]);
-        if (rrows.length > 0) {
-            const r = rrows[0];
-            const ok = await bcryptjs_1.default.compare(password, String(r.password));
-            if (!ok)
-                return res.status(401).json({ message: "Invalid credentials" });
-            return res.json({
-                success: true,
-                role: "RIDER",
-                profile: {
-                    id: r.rider_id,
-                    phone_number: r.phone_number,
-                    name: r.name,
-                    profile_image: r.profile_image,
-                    vehicle_image: r.vehicle_image,
-                    license_plate: r.license_plate,
-                },
-            });
+        const match = await bcryptjs_1.default.compare(password, user.passwordHash);
+        if (!match) {
+            return res
+                .status(401)
+                .json({ ok: false, message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
         }
-        // --- 3) ไม่พบทั้งคู่ ---
-        return res.status(401).json({ message: "Invalid credentials" });
+        const payload = {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            role: user.role,
+            avatarUrl: (0, upload_1.toAbsoluteUrl)(req, user.avatarUrl),
+            walletBalance: Number(user.walletBalance ?? 0),
+        };
+        const token = (0, jws_1.generateToken)(payload);
+        return res.json({ ok: true, token, user: payload });
     }
     catch (err) {
-        console.error("Login error:", err);
-        return res.status(500).json({ message: "Internal Server Error" });
+        console.error("LOGIN error:", err);
+        return res
+            .status(500)
+            .json({ ok: false, message: "เกิดข้อผิดพลาด กรุณาลองใหม่" });
     }
 });

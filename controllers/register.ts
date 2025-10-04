@@ -1,159 +1,80 @@
 import bcrypt from "bcryptjs";
 import express from "express";
-import mysql from "mysql2";
+import type { Pool, ResultSetHeader } from "mysql2/promise";
 import { conn } from "../db";
-import { User } from "../models/user";
-import { saveImageFromBase64 } from "./upload"; // <- import ฟังก์ชันใหม่
-import { Rider } from "../models/rider";
+import { saveImageFromBase64 } from "./upload";
 
 export const router = express.Router();
 
-router.post("/user", async (req, res) => {
+router.post("/", async (req, res) => {
   try {
-    const user: User = req.body;
-
-    // ---- validate ----
-    if (
-      !user.phone_number?.trim() ||
-      !user.password?.trim() ||
-      !user.name?.trim()
-    ) {
-      return res
-        .status(400)
-        .json({ message: "phone_number, password, name are required" });
-    }
-    if (user.password.length < 8) {
-      return res
-        .status(400)
-        .json({ message: "password must be at least 8 characters" });
+    const { username, email, password, avatarBase64 } = req.body || {};
+    if (!username || !email || !password) {
+      return res.status(400).json({ ok: false, message: "กรอกข้อมูลให้ครบ" });
     }
 
-    // ---- จัดการรูป ----
-    let profileUrl: string | null = null;
-    if (user.profile_image && typeof user.profile_image === "string") {
+    // avatar (optional, มินิมอล)
+    let avatar_url: string | null = null;
+    if (typeof avatarBase64 === "string" && avatarBase64.trim()) {
       try {
-        // ส่ง base64 เพียว ๆ เข้ามา พร้อมบอก ext เอง ("jpg" หรือ "png")
-        profileUrl = saveImageFromBase64(user.profile_image, "png");
-      } catch (imgErr: any) {
-        return res
-          .status(415)
-          .json({ message: imgErr?.message || "Invalid image" });
+        const m = avatarBase64.match(/^data:(.+?);base64,(.+)$/i);
+        const mime = m ? m[1] : "image/png";
+        const pure = m ? m[2] : avatarBase64;
+
+        // map mime -> ext ให้ตรงกับ helper (ตอนนี้รองรับแค่ 'jpg' | 'png')
+        let ext: "jpg" | "png" = "png";
+        if (/jpe?g/i.test(mime)) ext = "jpg";
+        else if (/png/i.test(mime)) ext = "png";
+        else {
+          // ถ้าเป็น webp/อื่น ๆ ยังไม่รองรับใน helper เดิม → แปลงเป็น png ชั่วคราว
+          // (ถ้าจะรองรับจริง แนะนำขยาย helper ให้รับ 'webp' ด้วย)
+          ext = "png";
+        }
+
+        avatar_url = saveImageFromBase64(pure, ext);
+      } catch {
+        avatar_url = null; // รูปพังไม่เป็นไร ให้ไปต่อ
       }
     }
 
-    // ---- เข้ารหัสรหัสผ่าน ----
-    const hashedPassword = await bcrypt.hash(user.password, 10);
+    const password_hash = await bcrypt.hash(String(password), 10);
 
-    // ---- SQL Insert ----
-    const sql = `
-      INSERT INTO User (phone_number, password, name, profile_image)
-      VALUES (?, ?, ?, ?)
-    `;
-    const params = [
-      user.phone_number.trim(),
-      hashedPassword,
-      user.name.trim(),
-      profileUrl,
-    ];
+    // ใช้ promise pool ตรง ๆ (ห้าม .promise())
+    const pool = conn as Pool;
+    const [result] = await pool.query<ResultSetHeader>(
+      `INSERT INTO users (username, email, password_hash, avatar_url)
+       VALUES (?, ?, ?, ?)`,
+      [
+        String(username).trim(),
+        String(email).trim().toLowerCase(),
+        password_hash,
+        avatar_url,
+      ]
+    );
 
-    conn.query(sql, params, (err, result) => {
-      if (err) {
-        if ((err as any).code === "ER_DUP_ENTRY") {
-          return res
-            .status(409)
-            .json({ message: "phone_number already exists" });
-        }
-        console.error("DB Error:", err);
-        return res.status(500).json({ message: "DB Error" });
-      }
-
-      const r = result as mysql.ResultSetHeader;
-      return res.status(201).json({
-        success: true,
-        message: "User registered successfully",
-        user: {
-          id: r.insertId,
-          phone_number: user.phone_number,
-          name: user.name,
-          profile_image: profileUrl,
-        },
-      });
+    return res.status(201).json({
+      ok: true,
+      message: "สมัครสมาชิกสำเร็จ",
+      data: {
+        id: result.insertId,
+        username,
+        email,
+        avatar_url,
+        role: "user",
+        wallet_balance: 0,
+      },
     });
-  } catch (e) {
-    console.error("Unexpected Error:", e);
-    return res.status(500).json({ message: "Internal Server Error" });
+  } catch (err: any) {
+    if (err?.code === "ER_DUP_ENTRY") {
+      return res
+        .status(409)
+        .json({ ok: false, message: "ชื่อผู้ใช้หรืออีเมลถูกใช้แล้ว" });
+    }
+    console.error("register error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, message: "เกิดข้อผิดพลาดภายในระบบ" });
   }
 });
 
-router.post("/rider", async (req, res) => {
-  try {
-    const rider: Rider = req.body;
-
-    // 1) validate เบื้องต้น
-    if (!rider.phone_number?.trim() || !rider.password?.trim() || !rider.name?.trim()) {
-      return res.status(400).json({ message: "phone_number, password, name are required" });
-    }
-    if (rider.password.length < 8) {
-      return res.status(400).json({ message: "password must be at least 8 characters" });
-    }
-
-    let profileUrl: string | null = null;
-    let vehicleUrl: string | null = null;
-
-    try {
-      if (typeof rider.profile_image === "string" && rider.profile_image.trim().length > 0) {
-        // ถ้าอยากเดาเป็น jpg ให้ส่งพารามิเตอร์ "jpg" ได้ เช่น saveImageFromBase64(..., "jpg")
-        profileUrl = saveImageFromBase64(rider.profile_image, "png");
-      }
-      if (typeof rider.vehicle_image === "string" && rider.vehicle_image.trim().length > 0) {
-        vehicleUrl = saveImageFromBase64(rider.vehicle_image, "png");
-      }
-    } catch (imgErr: any) {
-      return res.status(415).json({ message: imgErr?.message || "Invalid image" });
-    }
-
-    // 3) เข้ารหัสรหัสผ่าน
-    const hashedPassword = await bcrypt.hash(rider.password, 10);
-
-    // 4) SQL Insert (ชื่อตารางตรงกับสคีมาของคุณ: Rider ตัว R ใหญ่)
-    const sql = `
-      INSERT INTO Rider (phone_number, password, name, profile_image, vehicle_image, license_plate)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `;
-    const params = [
-      rider.phone_number.trim(),
-      hashedPassword,
-      rider.name.trim(),
-      profileUrl,
-      vehicleUrl,
-      rider.license_plate?.trim() || null,
-    ];
-
-    conn.query(sql, params, (err, result) => {
-      if (err) {
-        if ((err as any).code === "ER_DUP_ENTRY") {
-          return res.status(409).json({ message: "phone_number already exists" });
-        }
-        console.error("DB Error:", err);
-        return res.status(500).json({ message: "DB Error" });
-      }
-
-      const r = result as mysql.ResultSetHeader;
-      return res.status(201).json({
-        success: true,
-        message: "Rider registered successfully",
-        rider: {
-          rider_id: r.insertId,
-          phone_number: rider.phone_number,
-          name: rider.name,
-          profile_image: profileUrl,
-          vehicle_image: vehicleUrl,
-          license_plate: rider.license_plate ?? null,
-        },
-      });
-    });
-  } catch (e) {
-    console.error("Unexpected Error:", e);
-    return res.status(500).json({ message: "Internal Server Error" });
-  }
-});
+export default router;

@@ -1,11 +1,14 @@
-import mysql from "mysql2";
+import dotenv from "dotenv";
+import mysql from "mysql2/promise";
+dotenv.config();
 
 export const conn = mysql.createPool({
-  host: "202.28.34.203",
-  port: 3306,
-  user: "mb68_66011212194",
-  password: "RKbxYKrhHQ1#",
-  database: "mb68_66011212194",
+  host: process.env.DB_HOST,
+  port: Number(process.env.DB_PORT),
+  user: process.env.DB_USER,
+  password: process.env.DB_PASS,
+  database: process.env.DB_NAME,
   waitForConnections: true,
   connectionLimit: 10,
 });
+export type DBPool = typeof conn;

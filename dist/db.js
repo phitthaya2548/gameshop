@@ -4,13 +4,15 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.conn = void 0;
-const mysql2_1 = __importDefault(require("mysql2"));
-exports.conn = mysql2_1.default.createPool({
-    host: "202.28.34.203",
-    port: 3306,
-    user: "mb68_66011212194",
-    password: "RKbxYKrhHQ1#",
-    database: "mb68_66011212194",
+const dotenv_1 = __importDefault(require("dotenv"));
+const promise_1 = __importDefault(require("mysql2/promise"));
+dotenv_1.default.config();
+exports.conn = promise_1.default.createPool({
+    host: process.env.DB_HOST,
+    port: Number(process.env.DB_PORT),
+    user: process.env.DB_USER,
+    password: process.env.DB_PASS,
+    database: process.env.DB_NAME,
     waitForConnections: true,
     connectionLimit: 10,
 });
