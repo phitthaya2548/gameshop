@@ -1,11 +1,9 @@
-
 import bcrypt from "bcryptjs";
 import express from "express";
 import type { RowDataPacket } from "mysql2";
 import { conn } from "../db";
 import { generateToken } from "../middlewares/jws";
 import { toAbsoluteUrl } from "./upload";
-
 
 export const router = express.Router();
 
@@ -19,26 +17,30 @@ router.post("/", async (req, res) => {
     }
 
     const [[user]] = await conn.query<RowDataPacket[]>(
-      `SELECT
-         id,
-         username,
-         email,
-         password_hash AS passwordHash,
-         role,
-         avatar_url    AS avatarUrl,       -- ✅ alias เป็น camelCase
-         wallet_balance AS walletBalance   -- ✅ alias เป็น camelCase
-       FROM users
-       WHERE email = ?
-       LIMIT 1`,
+      `
+      SELECT
+        id,
+        username,
+        email,
+        password_hash AS passwordHash,
+        role,
+        avatar_url AS avatarUrl,
+        wallet_balance AS walletBalance
+      FROM users
+      WHERE email = ?
+      LIMIT 1
+    `,
       [email.toLowerCase()]
     );
 
+    // ✅ ตรวจสอบว่าพบ user หรือไม่
     if (!user) {
       return res
         .status(401)
         .json({ ok: false, message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
     }
 
+    // ✅ ตรวจสอบรหัสผ่าน
     const match = await bcrypt.compare(password, user.passwordHash);
     if (!match) {
       return res
@@ -46,16 +48,21 @@ router.post("/", async (req, res) => {
         .json({ ok: false, message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
     }
 
+    // ✅ สร้าง URL เต็มสำหรับ avatar
+    const avatarUrl = toAbsoluteUrl(req, user.avatarUrl);
+
+
     const payload = {
       id: user.id,
       username: user.username,
       email: user.email,
       role: user.role as "user" | "admin",
-      avatarUrl: toAbsoluteUrl(req, user.avatarUrl),
+      avatarUrl,
       walletBalance: Number(user.walletBalance ?? 0),
     };
 
     const token = generateToken(payload);
+
     return res.json({ ok: true, token, user: payload });
   } catch (err) {
     console.error("LOGIN error:", err);

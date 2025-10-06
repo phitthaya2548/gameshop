@@ -1,50 +1,61 @@
+
 import type { Request } from "express";
 import fs from "fs";
+import multer from "multer";
 import path from "path";
 
-export function saveImageFromBase64(
-  base64OrDataUrl: string,
-  ext: "jpg" | "png" | "webp" = "png"
+const UPLOAD_DIR = path.join(process.cwd(), "uploads");
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+const ALLOWED = new Set(["image/jpeg", "image/png", "image/webp"]);
+const EXT_MAP: Record<string, string> = {
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+};
+
+
+
+export function saveImageBufferToUploads(
+  buffer: Buffer,
+  mime: string
 ): string {
-  if (!base64OrDataUrl || base64OrDataUrl.trim().length === 0) return "";
+  let ext: 'png' | 'jpg' | 'webp' = 'png';
+  const m = mime.toLowerCase();
+  if (m.includes('jpeg') || m.includes('jpg')) ext = 'jpg';
+  else if (m.includes('png')) ext = 'png';
+  else if (m.includes('webp')) ext = 'webp';
 
-  // รองรับ data URL
-  let detectedExt: "jpg" | "png" | "webp" | null = null;
-  const m = base64OrDataUrl.match(/^data:(.+?);base64,(.+)$/i);
-  let pureBase64 = m ? m[2] : base64OrDataUrl;
-
-  // ตัดช่องว่าง/ขึ้นบรรทัด ที่อาจทำให้ไฟล์เสีย
-  pureBase64 = pureBase64.replace(/\s+/g, "");
-
-  // ถ้ามี MIME ให้ map เป็นนามสกุล
-  if (m) {
-    const mime = m[1].toLowerCase();
-    if (mime.includes("jpeg") || mime.includes("jpg")) detectedExt = "jpg";
-    else if (mime.includes("png")) detectedExt = "png";
-    else if (mime.includes("webp")) detectedExt = "webp";
-  }
-
-  const finalExt = detectedExt ?? ext; // ให้ MIME เป็นตัวกำหนดก่อน
-  const filename = `${Date.now()}.${finalExt}`;
-  const dir = path.join(process.cwd(), "uploads");
+  const dir = path.join(process.cwd(), 'uploads');
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, filename), Buffer.from(pureBase64, "base64"));
 
+  const filename = `${Date.now()}.${ext}`;
+  fs.writeFileSync(path.join(dir, filename), buffer);
+
+  // เก็บใน DB เป็น path สั้นใต้ /uploads ตามนโยบาย
   return `/uploads/${filename}`;
 }
+
 export function toAbsoluteUrl(
   req: Request,
   input?: string | null
 ): string | null {
   if (!input) return null;
 
-  if (/^https?:\/\//i.test(input)) return input;
+  // กัน external URL
+  if (/^https?:\/\//i.test(input)) return null;
+
+  let p = input.trim().replace(/^\/+/, "");
+  if (!/^uploads\//i.test(p)) p = `uploads/${p}`;
 
   const base = `${req.protocol}://${req.get("host")}`;
-
-  // ทำให้ขึ้นต้นด้วย /uploads เสมอ
-  let path = input.trim().replace(/^\/+/, "");
-  if (!/^uploads\//i.test(path)) path = `uploads/${path}`;
-
-  return `${base}/${path}`;
+  return `${base}/${p}`;
 }
+export const upload = multer({
+  storage: multer.memoryStorage(),              // เก็บไว้ในหน่วยความจำก่อน
+  limits: { fileSize: 2 * 1024 * 1024 },        // 2MB
+  fileFilter: (req, file, cb) => {
+    if (/^image\/(png|jpe?g|webp)$/i.test(file.mimetype)) cb(null, true);
+    else cb(new Error('รองรับเฉพาะไฟล์รูป png/jpg/webp'));
+  },
+})

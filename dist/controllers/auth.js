@@ -18,34 +18,40 @@ exports.router.post("/", async (req, res) => {
                 .status(400)
                 .json({ ok: false, message: "กรอกอีเมลและรหัสผ่าน" });
         }
-        const [[user]] = await db_1.conn.query(`SELECT
-         id,
-         username,
-         email,
-         password_hash AS passwordHash,
-         role,
-         avatar_url    AS avatarUrl,       -- ✅ alias เป็น camelCase
-         wallet_balance AS walletBalance   -- ✅ alias เป็น camelCase
-       FROM users
-       WHERE email = ?
-       LIMIT 1`, [email.toLowerCase()]);
+        const [[user]] = await db_1.conn.query(`
+      SELECT
+        id,
+        username,
+        email,
+        password_hash AS passwordHash,
+        role,
+        avatar_url AS avatarUrl,
+        wallet_balance AS walletBalance
+      FROM users
+      WHERE email = ?
+      LIMIT 1
+    `, [email.toLowerCase()]);
+        // ✅ ตรวจสอบว่าพบ user หรือไม่
         if (!user) {
             return res
                 .status(401)
                 .json({ ok: false, message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
         }
+        // ✅ ตรวจสอบรหัสผ่าน
         const match = await bcryptjs_1.default.compare(password, user.passwordHash);
         if (!match) {
             return res
                 .status(401)
                 .json({ ok: false, message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
         }
+        // ✅ สร้าง URL เต็มสำหรับ avatar
+        const avatarUrl = (0, upload_1.toAbsoluteUrl)(req, user.avatarUrl);
         const payload = {
             id: user.id,
             username: user.username,
             email: user.email,
             role: user.role,
-            avatarUrl: (0, upload_1.toAbsoluteUrl)(req, user.avatarUrl),
+            avatarUrl,
             walletBalance: Number(user.walletBalance ?? 0),
         };
         const token = (0, jws_1.generateToken)(payload);
