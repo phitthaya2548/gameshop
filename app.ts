@@ -25,7 +25,9 @@ app.use(express.urlencoded({ extended: true, limit: "80mb" }));
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 app.use("/login", auth);
 app.use("/register", register);
-
+app.get("/", (_req, res) => {
+  res.status(200).json({ ok: "Test Hello GameShop" });
+});
 app.use(jwtAuthen);
 app.use("/history", history);
 app.use("/me", user);
@@ -45,9 +47,7 @@ app.use(
     return res.status(500).json({ ok: false, message: "Server error" });
   }
 );
-app.get("/", (_req, res) => {
-  res.status(200).json({ ok: "Test Hello GameShop" });
-});
+
 
 app.use((_req, res) => {
   res.status(404).json({ message: "Not Found" });
