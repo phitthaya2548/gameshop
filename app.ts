@@ -28,10 +28,11 @@ app.use("/register", register);
 app.get("/", (_req, res) => {
   res.status(200).json({ ok: "Test Hello GameShop" });
 });
+app.use("/admin", addgame);
 app.use(jwtAuthen);
 app.use("/history", history);
 app.use("/me", user);
-app.use("/admin", addgame);
+
 app.use("/coupon", coupon);
 app.use(
   (

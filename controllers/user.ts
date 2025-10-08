@@ -577,13 +577,38 @@ ORDER BY ci.id DESC
   }
 });
 router.post("/cart/add", async (req, res) => {
-  const auth = (req as any).auth as { id: number } | undefined;
-  if (!auth)
+  const auth = (req as any).auth as
+    | { id: number; role?: "user" | "admin" }
+    | undefined;
+  if (!auth) {
     return res.status(401).json({ ok: false, message: "Unauthorized" });
+  }
+
+  // ✅ บล็อก admin (เช็กจาก payload; ถ้าไม่มี role ใน payload ให้ไปดูจาก DB)
+  try {
+    let role = auth.role;
+    if (!role) {
+      const [[u]] = await conn.query<RowDataPacket[]>(
+        `SELECT role FROM users WHERE id = ? LIMIT 1`,
+        [auth.id]
+      );
+      if (!u)
+        return res.status(401).json({ ok: false, message: "Unauthorized" });
+      role = u.role as "user" | "admin";
+    }
+    if (role === "admin") {
+      return res.status(403).json({
+        ok: false,
+        message: "บัญชีผู้ดูแลระบบไม่สามารถเพิ่มสินค้าในตะกร้าได้",
+      });
+    }
+  } catch (e) {
+    console.error("role check error:", e);
+    return res.status(500).json({ ok: false, message: "Server error" });
+  }
 
   const raw = req.body?.gameId;
   const gameId = Number(raw);
-
   if (!Number.isFinite(gameId) || gameId <= 0) {
     return res.status(400).json({ ok: false, message: "Invalid gameId" });
   }
@@ -594,9 +619,7 @@ router.post("/cart/add", async (req, res) => {
 
     // กันเพิ่มเกมที่มีอยู่แล้วใน library (เกมที่ซื้อแล้ว)
     const [[own]] = await cx.query<RowDataPacket[]>(
-      `
-      SELECT 1 FROM order_items WHERE user_id=? AND game_id=? LIMIT 1
-    `,
+      `SELECT 1 FROM order_items WHERE user_id=? AND game_id=? LIMIT 1`,
       [auth.id, gameId]
     );
     if (own) {
@@ -609,9 +632,7 @@ router.post("/cart/add", async (req, res) => {
 
     // เกมมีจริงไหม
     const [[game]] = await cx.query<RowDataPacket[]>(
-      `
-      SELECT id FROM games WHERE id=? LIMIT 1
-    `,
+      `SELECT id FROM games WHERE id=? LIMIT 1`,
       [gameId]
     );
     if (!game) {
@@ -621,32 +642,20 @@ router.post("/cart/add", async (req, res) => {
 
     // เช็คว่าเกมนี้อยู่ในตะกร้าหรือยัง
     const [[cartItem]] = await cx.query<RowDataPacket[]>(
-      `
-      SELECT * FROM cart_items WHERE user_id=? AND game_id=? LIMIT 1
-    `,
+      `SELECT * FROM cart_items WHERE user_id=? AND game_id=? LIMIT 1`,
       [auth.id, gameId]
     );
 
     if (cartItem) {
-      // ถ้าเกมมีอยู่ในตะกร้าแล้วจะเพิ่มจำนวน
       await cx.query(
-        `
-        UPDATE cart_items SET qty = qty + 1 WHERE user_id = ? AND game_id = ?
-      `,
+        `UPDATE cart_items SET qty = qty + 1 WHERE user_id = ? AND game_id = ?`,
         [auth.id, gameId]
       );
       await cx.commit();
-      return res.json({
-        ok: true,
-        message: "เกมนี้มีอยู่ในตะกร้าแล้ว",
-      });
+      return res.json({ ok: true, message: "เพิ่มจำนวนเกมในตะกร้าแล้ว" });
     } else {
-      // ถ้าเกมยังไม่มีในตะกร้า ให้เพิ่มเกมใหม่
       await cx.query(
-        `
-        INSERT INTO cart_items (user_id, game_id, qty)
-        VALUES (?, ?, 1)
-      `,
+        `INSERT INTO cart_items (user_id, game_id, qty) VALUES (?, ?, 1)`,
         [auth.id, gameId]
       );
       await cx.commit();
@@ -657,6 +666,7 @@ router.post("/cart/add", async (req, res) => {
     return res.status(500).json({ ok: false, message: "Server error" });
   }
 });
+
 // DELETE /cart/:gameId – เอาออกจากตะกร้า
 router.delete("/cart/:gameId", async (req, res) => {
   const auth = (req as any).auth as { id: number } | undefined;
@@ -700,6 +710,54 @@ router.post("/checkout", async (req, res) => {
     return res.json({ ok: true, message: "สั่งซื้อเรียบร้อยแล้ว" });
   } catch (e) {
     console.error("POST /checkout error:", e);
+    return res.status(500).json({ ok: false, message: "Server error" });
+  }
+});
+router.get("/mygames", async (req, res) => {
+  const auth = (req as any).auth as { id: number } | undefined;
+  if (!auth)
+    return res.status(401).json({ ok: false, message: "Unauthorized" });
+
+  try {
+    // หมายเหตุ: ปกติคุณกันซื้อซ้ำไว้แล้ว จึง 1 เกมจะมีได้แค่ครั้งเดียว
+    const sql = `
+      SELECT
+        oi.game_id               AS gameId,
+        g.title,
+        g.price,
+        g.category_name          AS categoryName,
+        g.description,
+        g.release_date           AS releaseDate,
+        g.images,                              -- เก็บเป็น path/URL
+        o.created_at             AS purchasedAt
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      JOIN games  g ON g.id = oi.game_id
+      WHERE o.user_id = ?
+      ORDER BY o.created_at DESC, oi.id DESC
+    `;
+    const [rows] = await conn.query<RowDataPacket[]>(sql, [auth.id]);
+
+    const purchases = rows.map((r) => ({
+      gameId: Number(r.gameId),
+      title: r.title,
+      price: Number(r.price || 0),
+      categoryName: r.categoryName ?? null,
+      description: r.description ?? null,
+      releaseDate: r.releaseDate ?? null,
+      purchasedAt: r.purchasedAt ?? null,
+      image: r.images ? toAbsoluteUrl(req, r.images) : null, // แปลงเป็น absolute URL
+    }));
+
+    // ไม่ต้องเช็ค length ฝั่งเซิร์ฟเวอร์ — ส่ง array กลับไปตรง ๆ
+    // ฝั่ง Client จะเช็คว่ามี array ว่างหรือไม่เพื่อแสดง "ยังไม่มีเกม"
+    return res.json({
+      ok: true,
+      count: purchases.length, // เผื่อ UI ใช้นับจำนวน
+      purchases,
+    });
+  } catch (e) {
+    console.error("GET /orders/my-games error:", e);
     return res.status(500).json({ ok: false, message: "Server error" });
   }
 });

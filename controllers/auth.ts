@@ -56,13 +56,12 @@ router.post("/", async (req, res) => {
       id: user.id,
       username: user.username,
       email: user.email,
-      role: user.role as "user" | "admin",
+      role: user.role as "user",
       avatarUrl,
       walletBalance: Number(user.walletBalance ?? 0),
     };
 
     const token = generateToken(payload);
-
     return res.json({ ok: true, token, user: payload });
   } catch (err) {
     console.error("LOGIN error:", err);
