@@ -466,64 +466,105 @@ exports.router.post("/cart/add", async (req, res) => {
     const auth = req.auth;
     if (!auth)
         return res.status(401).json({ ok: false, message: "Unauthorized" });
-    const raw = req.body?.gameId;
-    const gameId = Number(raw);
+    // ⛔ บล็อก admin
+    try {
+        let role = auth.role;
+        if (!role) {
+            const [[u]] = await db_1.conn.query("SELECT role FROM users WHERE id=? LIMIT 1", [auth.id]);
+            if (!u)
+                return res.status(401).json({ ok: false, message: "Unauthorized" });
+            role = u.role;
+        }
+        if (role === "admin") {
+            return res.status(403).json({
+                ok: false,
+                message: "บัญชีผู้ดูแลระบบไม่สามารถเพิ่มสินค้าในตะกร้าได้",
+            });
+        }
+    }
+    catch (e) {
+        console.error("role check error:", e);
+        return res.status(500).json({ ok: false, message: "Server error" });
+    }
+    const gameId = Number(req.body?.gameId);
     if (!Number.isFinite(gameId) || gameId <= 0) {
         return res.status(400).json({ ok: false, message: "Invalid gameId" });
     }
+    const db = await db_1.conn.getConnection();
     try {
-        const cx = await db_1.conn.getConnection();
-        await cx.beginTransaction();
-        // กันเพิ่มเกมที่มีอยู่แล้วใน library (เกมที่ซื้อแล้ว)
-        const [[own]] = await cx.query(`
-      SELECT 1 FROM order_items WHERE user_id=? AND game_id=? LIMIT 1
-    `, [auth.id, gameId]);
+        // ลดโอกาส gap/next-key lock
+        await db.query("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED");
+        // ✅ คำสั่งเดียวจบ: แทรกเฉพาะเมื่อมีเกมอยู่จริงและยังไม่เป็นเจ้าของ
+        // ถ้ามีอยู่ในตะกร้าแล้วจะ UPDATE qty (+1) แบบ atomic
+        const sql = `
+  INSERT INTO cart_items (user_id, game_id, qty)
+  SELECT ?, ?, 1
+  FROM DUAL
+  WHERE EXISTS (SELECT 1 FROM games WHERE id = ?)
+    AND NOT EXISTS (SELECT 1 FROM order_items WHERE user_id = ? AND game_id = ?)
+  ON DUPLICATE KEY UPDATE
+    qty = LEAST(qty + 1, 99)
+`;
+        const params = [auth.id, gameId, gameId, auth.id, gameId];
+        // retry สั้น ๆ กรณีชน lock/deadlock
+        const execWithRetry = async () => {
+            let n = 0;
+            for (;;) {
+                try {
+                    const [r] = await db.execute(sql, params);
+                    return r;
+                }
+                catch (e) {
+                    if ((e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") &&
+                        n < 3) {
+                        await new Promise((r) => setTimeout(r, 60 * Math.pow(2, n)));
+                        n++;
+                        continue;
+                    }
+                    throw e;
+                }
+            }
+        };
+        const result = await execWithRetry();
+        // MySQL semantics:
+        // - insert ใหม่ => affectedRows = 1
+        // - duplicate → update => affectedRows = 2
+        // - guard ไม่ผ่าน (ไม่พบเกม/เป็นเจ้าของแล้ว) => affectedRows = 0
+        if (result.affectedRows === 1) {
+            return res.json({ ok: true, message: "เพิ่มลงตะกร้าแล้ว" });
+        }
+        if (result.affectedRows === 2) {
+            return res.json({ ok: true, message: "เพิ่มจำนวนเกมในตะกร้าแล้ว" });
+        }
+        // affectedRows = 0 → หาเหตุผลเพื่อข้อความที่ถูกต้อง
+        const [[g]] = await db.query("SELECT id FROM games WHERE id=? LIMIT 1", [gameId]);
+        if (!g)
+            return res.status(404).json({ ok: false, message: "ไม่พบเกม" });
+        const [[own]] = await db.query("SELECT 1 FROM order_items WHERE user_id=? AND game_id=? LIMIT 1", [auth.id, gameId]);
         if (own) {
-            await cx.rollback();
             return res.status(409).json({
                 ok: false,
                 message: "คุณเป็นเจ้าของเกมนี้แล้ว ไม่สามารถเพิ่มในตะกร้าได้",
             });
         }
-        // เกมมีจริงไหม
-        const [[game]] = await cx.query(`
-      SELECT id FROM games WHERE id=? LIMIT 1
-    `, [gameId]);
-        if (!game) {
-            await cx.rollback();
-            return res.status(404).json({ ok: false, message: "ไม่พบเกม" });
-        }
-        // เช็คว่าเกมนี้อยู่ในตะกร้าหรือยัง
-        const [[cartItem]] = await cx.query(`
-      SELECT * FROM cart_items WHERE user_id=? AND game_id=? LIMIT 1
-    `, [auth.id, gameId]);
-        if (cartItem) {
-            // ถ้าเกมมีอยู่ในตะกร้าแล้วจะเพิ่มจำนวน
-            await cx.query(`
-        UPDATE cart_items SET qty = qty + 1 WHERE user_id = ? AND game_id = ?
-      `, [auth.id, gameId]);
-            await cx.commit();
-            return res.json({
-                ok: true,
-                message: "เกมนี้มีอยู่ในตะกร้าแล้ว",
-            });
-        }
-        else {
-            // ถ้าเกมยังไม่มีในตะกร้า ให้เพิ่มเกมใหม่
-            await cx.query(`
-        INSERT INTO cart_items (user_id, game_id, qty)
-        VALUES (?, ?, 1)
-      `, [auth.id, gameId]);
-            await cx.commit();
-            return res.json({ ok: true, message: "เพิ่มลงตะกร้าแล้ว" });
-        }
+        // กรณีอื่น ๆ (ไม่น่าเกิด)
+        return res
+            .status(409)
+            .json({ ok: false, message: "ไม่สามารถเพิ่มสินค้าลงตะกร้าได้" });
     }
     catch (e) {
+        if (e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") {
+            return res
+                .status(409)
+                .json({ ok: false, message: "ระบบไม่พร้อม โปรดลองอีกครั้ง" });
+        }
         console.error("POST /cart/add error:", e);
         return res.status(500).json({ ok: false, message: "Server error" });
     }
+    finally {
+        db.release();
+    }
 });
-// DELETE /cart/:gameId – เอาออกจากตะกร้า
 exports.router.delete("/cart/:gameId", async (req, res) => {
     const auth = req.auth;
     if (!auth)
@@ -532,18 +573,48 @@ exports.router.delete("/cart/:gameId", async (req, res) => {
     if (!Number.isFinite(gameId) || gameId <= 0) {
         return res.status(400).json({ ok: false, message: "Invalid gameId" });
     }
+    const db = await db_1.conn.getConnection();
     try {
-        const [rs] = await db_1.conn.query(`DELETE FROM cart_items WHERE user_id=? AND game_id=?`, [auth.id, gameId]);
-        if (!rs.affectedRows) {
-            return res
-                .status(404)
-                .json({ ok: false, message: "ไม่พบรายการในตะกร้า" });
+        // ลดโอกาส gap/next-key lock สำหรับคำสั่งสั้น ๆ
+        await db.query("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED");
+        const sql = `DELETE FROM cart_items WHERE user_id=? AND game_id=? LIMIT 1`;
+        const params = [auth.id, gameId];
+        // retry สั้น ๆ เมื่อชน lock/deadlock
+        const execWithRetry = async () => {
+            let n = 0;
+            for (;;) {
+                try {
+                    const [r] = await db.execute(sql, params);
+                    r;
+                }
+                catch (e) {
+                    if ((e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") &&
+                        n < 3) {
+                        await new Promise((r) => setTimeout(r, 60 * Math.pow(2, n))); // 60ms, 120ms, 240ms
+                        n++;
+                        continue;
+                    }
+                    throw e;
+                }
+            }
+        };
+        const result = await execWithRetry();
+        if (!result.affectedRows) {
+            res.status(404).json({ ok: false, message: "ไม่พบรายการในตะกร้า" });
         }
-        return res.json({ ok: true, message: "ลบออกจากตะกร้าแล้ว" });
+        res.json({ ok: true, message: "ลบออกจากตะกร้าแล้ว" });
     }
     catch (e) {
+        if (e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") {
+            return res
+                .status(409)
+                .json({ ok: false, message: "ระบบไม่พร้อม โปรดลองอีกครั้ง" });
+        }
         console.error("DELETE /cart/:gameId error:", e);
         return res.status(500).json({ ok: false, message: "Server error" });
+    }
+    finally {
+        db.release();
     }
 });
 exports.router.post("/checkout", async (req, res) => {
@@ -559,6 +630,52 @@ exports.router.post("/checkout", async (req, res) => {
     }
     catch (e) {
         console.error("POST /checkout error:", e);
+        return res.status(500).json({ ok: false, message: "Server error" });
+    }
+});
+exports.router.get("/mygames", async (req, res) => {
+    const auth = req.auth;
+    if (!auth)
+        return res.status(401).json({ ok: false, message: "Unauthorized" });
+    try {
+        // หมายเหตุ: ปกติคุณกันซื้อซ้ำไว้แล้ว จึง 1 เกมจะมีได้แค่ครั้งเดียว
+        const sql = `
+      SELECT
+        oi.game_id               AS gameId,
+        g.title,
+        g.price,
+        g.category_name          AS categoryName,
+        g.description,
+        g.release_date           AS releaseDate,
+        g.images,                              -- เก็บเป็น path/URL
+        o.created_at             AS purchasedAt
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      JOIN games  g ON g.id = oi.game_id
+      WHERE o.user_id = ?
+      ORDER BY o.created_at DESC, oi.id DESC
+    `;
+        const [rows] = await db_1.conn.query(sql, [auth.id]);
+        const purchases = rows.map((r) => ({
+            gameId: Number(r.gameId),
+            title: r.title,
+            price: Number(r.price || 0),
+            categoryName: r.categoryName ?? null,
+            description: r.description ?? null,
+            releaseDate: r.releaseDate ?? null,
+            purchasedAt: r.purchasedAt ?? null,
+            image: r.images ? (0, upload_1.toAbsoluteUrl)(req, r.images) : null, // แปลงเป็น absolute URL
+        }));
+        // ไม่ต้องเช็ค length ฝั่งเซิร์ฟเวอร์ — ส่ง array กลับไปตรง ๆ
+        // ฝั่ง Client จะเช็คว่ามี array ว่างหรือไม่เพื่อแสดง "ยังไม่มีเกม"
+        return res.json({
+            ok: true,
+            count: purchases.length, // เผื่อ UI ใช้นับจำนวน
+            purchases,
+        });
+    }
+    catch (e) {
+        console.error("GET /orders/my-games error:", e);
         return res.status(500).json({ ok: false, message: "Server error" });
     }
 });
