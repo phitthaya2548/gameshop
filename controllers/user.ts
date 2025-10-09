@@ -699,7 +699,6 @@ router.post("/cart/add", async (req, res) => {
   }
 });
 
-// DELETE /cart/:gameId – เอาออกจากตะกร้า
 router.delete("/cart/:gameId", async (req, res) => {
   const auth = (req as any).auth as { id: number } | undefined;
   if (!auth)
@@ -710,22 +709,54 @@ router.delete("/cart/:gameId", async (req, res) => {
     return res.status(400).json({ ok: false, message: "Invalid gameId" });
   }
 
+  const db = await conn.getConnection();
   try {
-    const [rs] = await conn.query<ResultSetHeader>(
-      `DELETE FROM cart_items WHERE user_id=? AND game_id=?`,
-      [auth.id, gameId]
-    );
-    if (!rs.affectedRows) {
-      return res
-        .status(404)
-        .json({ ok: false, message: "ไม่พบรายการในตะกร้า" });
+    // ลดโอกาส gap/next-key lock สำหรับคำสั่งสั้น ๆ
+    await db.query("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED");
+
+    const sql = `DELETE FROM cart_items WHERE user_id=? AND game_id=? LIMIT 1`;
+    const params = [auth.id, gameId];
+
+    // retry สั้น ๆ เมื่อชน lock/deadlock
+    const execWithRetry = async () => {
+      let n = 0;
+      for (;;) {
+        try {
+          const [r]: any = await db.execute(sql, params);
+          r;
+        } catch (e: any) {
+          if (
+            (e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") &&
+            n < 3
+          ) {
+            await new Promise((r) => setTimeout(r, 60 * Math.pow(2, n))); // 60ms, 120ms, 240ms
+            n++;
+            continue;
+          }
+          throw e;
+        }
+      }
+    };
+
+    const result: any = await execWithRetry();
+
+    if (!result.affectedRows) {
+      res.status(404).json({ ok: false, message: "ไม่พบรายการในตะกร้า" });
     }
-    return res.json({ ok: true, message: "ลบออกจากตะกร้าแล้ว" });
-  } catch (e) {
+    res.json({ ok: true, message: "ลบออกจากตะกร้าแล้ว" });
+  } catch (e: any) {
+    if (e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") {
+      return res
+        .status(409)
+        .json({ ok: false, message: "ระบบไม่พร้อม โปรดลองอีกครั้ง" });
+    }
     console.error("DELETE /cart/:gameId error:", e);
     return res.status(500).json({ ok: false, message: "Server error" });
+  } finally {
+    db.release();
   }
 });
+
 router.post("/checkout", async (req, res) => {
   const auth = (req as any).auth as { id: number } | undefined;
   if (!auth)
