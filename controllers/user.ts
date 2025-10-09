@@ -611,67 +611,68 @@ router.post("/cart/add", async (req, res) => {
     return res.status(400).json({ ok: false, message: "Invalid gameId" });
   }
 
-  const db = await conn.getConnection();
-  try {
-    // ลดโอกาส gap/next-key lock
-    await db.query("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED");
+  // ✅ คำสั่งเดียวจบ: แทรกเมื่อมีเกมอยู่จริงและยังไม่เป็นเจ้าของ
+  //    ถ้ามีในตะกร้าแล้ว → บวก 1 (เพดาน 99)
+  const sql = `
+    INSERT INTO cart_items (user_id, game_id, qty)
+    SELECT ?, ?, 1
+    FROM DUAL
+    WHERE EXISTS (SELECT 1 FROM games WHERE id = ?)
+      AND NOT EXISTS (SELECT 1 FROM order_items WHERE user_id = ? AND game_id = ?)
+    ON DUPLICATE KEY UPDATE
+      qty = CASE WHEN qty < 99 THEN qty + 1 ELSE qty END
+  `;
+  const params = [auth.id, gameId, gameId, auth.id, gameId];
 
-    // ✅ คำสั่งเดียวจบ: แทรกเฉพาะเมื่อมีเกมอยู่จริงและยังไม่เป็นเจ้าของ
-    // ถ้ามีอยู่ในตะกร้าแล้วจะ UPDATE qty (+1) แบบ atomic
-    const sql = `
-  INSERT INTO cart_items (user_id, game_id, qty)
-  SELECT ?, ?, 1
-  FROM DUAL
-  WHERE EXISTS (SELECT 1 FROM games WHERE id = ?)
-    AND NOT EXISTS (SELECT 1 FROM order_items WHERE user_id = ? AND game_id = ?)
-  ON DUPLICATE KEY UPDATE
-    qty = LEAST(qty + 1, 99)
-`;
-
-    const params = [auth.id, gameId, gameId, auth.id, gameId];
-
-    // retry สั้น ๆ กรณีชน lock/deadlock
-    const execWithRetry = async () => {
-      let n = 0;
-      for (;;) {
-        try {
-          const [r]: any = await db.execute(sql, params);
-          return r;
-        } catch (e: any) {
-          if (
-            (e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") &&
-            n < 3
-          ) {
-            await new Promise((r) => setTimeout(r, 60 * Math.pow(2, n)));
-            n++;
-            continue;
-          }
-          throw e;
+  // retry เบา ๆ เฉพาะ lock/deadlock
+  const execWithRetry = async (tries = 3) => {
+    let n = 0;
+    for (;;) {
+      try {
+        const [r]: any = await conn.execute(sql, params); // ใช้ pool ตรง ๆ
+        return r;
+      } catch (e: any) {
+        if (
+          (e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") &&
+          n < tries
+        ) {
+          await new Promise((r) => setTimeout(r, 60 * Math.pow(2, n))); // 60 → 120 → 240ms
+          n++;
+          continue;
         }
+        throw e;
       }
-    };
+    }
+  };
 
+  try {
     const result: any = await execWithRetry();
 
-    // MySQL semantics:
+    // semantics:
     // - insert ใหม่ => affectedRows = 1
-    // - duplicate → update => affectedRows = 2
-    // - guard ไม่ผ่าน (ไม่พบเกม/เป็นเจ้าของแล้ว) => affectedRows = 0
+    // - duplicate → update => affectedRows = 2 (changedRows บอกว่าเพิ่ม qty สำเร็จไหม)
     if (result.affectedRows === 1) {
       return res.json({ ok: true, message: "เพิ่มลงตะกร้าแล้ว" });
     }
     if (result.affectedRows === 2) {
+      // ถ้า qty เดิม = 99, CASE จะไม่เปลี่ยนค่า → changedRows = 0
+      if (typeof result.changedRows === "number" && result.changedRows === 0) {
+        return res.json({
+          ok: true,
+          message: "อยู่ในตะกร้าแล้ว (ครบจำนวนสูงสุด)",
+        });
+      }
       return res.json({ ok: true, message: "เพิ่มจำนวนเกมในตะกร้าแล้ว" });
     }
 
-    // affectedRows = 0 → หาเหตุผลเพื่อข้อความที่ถูกต้อง
-    const [[g]] = await db.query<RowDataPacket[]>(
+    // affectedRows = 0 → guard ไม่ผ่าน (หาเหตุผลแจ้งผู้ใช้)
+    const [[g]] = await conn.query<RowDataPacket[]>(
       "SELECT id FROM games WHERE id=? LIMIT 1",
       [gameId]
     );
     if (!g) return res.status(404).json({ ok: false, message: "ไม่พบเกม" });
 
-    const [[own]] = await db.query<RowDataPacket[]>(
+    const [[own]] = await conn.query<RowDataPacket[]>(
       "SELECT 1 FROM order_items WHERE user_id=? AND game_id=? LIMIT 1",
       [auth.id, gameId]
     );
@@ -682,7 +683,6 @@ router.post("/cart/add", async (req, res) => {
       });
     }
 
-    // กรณีอื่น ๆ (ไม่น่าเกิด)
     return res
       .status(409)
       .json({ ok: false, message: "ไม่สามารถเพิ่มสินค้าลงตะกร้าได้" });
@@ -694,11 +694,10 @@ router.post("/cart/add", async (req, res) => {
     }
     console.error("POST /cart/add error:", e);
     return res.status(500).json({ ok: false, message: "Server error" });
-  } finally {
-    db.release();
   }
 });
 
+// DELETE /cart/:gameId – ไม่ตั้งค่า lock เอง, single statement, มี retry
 router.delete("/cart/:gameId", async (req, res) => {
   const auth = (req as any).auth as { id: number } | undefined;
   if (!auth)
@@ -709,27 +708,23 @@ router.delete("/cart/:gameId", async (req, res) => {
     return res.status(400).json({ ok: false, message: "Invalid gameId" });
   }
 
-  const db = await conn.getConnection();
+  const sql = `DELETE FROM cart_items WHERE user_id=? AND game_id=? LIMIT 1`;
+  const params = [auth.id, gameId];
+
   try {
-    // ลดโอกาส gap/next-key lock สำหรับคำสั่งสั้น ๆ
-    await db.query("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED");
-
-    const sql = `DELETE FROM cart_items WHERE user_id=? AND game_id=? LIMIT 1`;
-    const params = [auth.id, gameId];
-
-    // retry สั้น ๆ เมื่อชน lock/deadlock
-    const execWithRetry = async () => {
+    // retry สั้น ๆ เฉพาะกรณีชน lock/deadlock
+    const execWithRetry = async (tries = 3) => {
       let n = 0;
       for (;;) {
         try {
-          const [r]: any = await db.execute(sql, params);
-          r;
+          const [r]: any = await conn.execute(sql, params); // ใช้ pool ตรง ๆ ไม่ต้อง getConnection()
+          return r; // ต้อง return
         } catch (e: any) {
           if (
             (e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") &&
-            n < 3
+            n < tries
           ) {
-            await new Promise((r) => setTimeout(r, 60 * Math.pow(2, n))); // 60ms, 120ms, 240ms
+            await new Promise((r) => setTimeout(r, 60 * Math.pow(2, n))); // 60ms → 120ms → 240ms
             n++;
             continue;
           }
@@ -741,9 +736,11 @@ router.delete("/cart/:gameId", async (req, res) => {
     const result: any = await execWithRetry();
 
     if (!result.affectedRows) {
-      res.status(404).json({ ok: false, message: "ไม่พบรายการในตะกร้า" });
+      return res
+        .status(404)
+        .json({ ok: false, message: "ไม่พบรายการในตะกร้า" });
     }
-    res.json({ ok: true, message: "ลบออกจากตะกร้าแล้ว" });
+    return res.json({ ok: true, message: "ลบออกจากตะกร้าแล้ว" });
   } catch (e: any) {
     if (e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") {
       return res
@@ -752,8 +749,6 @@ router.delete("/cart/:gameId", async (req, res) => {
     }
     console.error("DELETE /cart/:gameId error:", e);
     return res.status(500).json({ ok: false, message: "Server error" });
-  } finally {
-    db.release();
   }
 });
 
