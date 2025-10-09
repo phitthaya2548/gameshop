@@ -619,15 +619,14 @@ router.post("/cart/add", async (req, res) => {
     // ✅ คำสั่งเดียวจบ: แทรกเฉพาะเมื่อมีเกมอยู่จริงและยังไม่เป็นเจ้าของ
     // ถ้ามีอยู่ในตะกร้าแล้วจะ UPDATE qty (+1) แบบ atomic
     const sql = `
-      INSERT INTO cart_items (user_id, game_id, qty)
-      SELECT ?, ?, 1
-      FROM DUAL
-      WHERE EXISTS (SELECT 1 FROM games WHERE id = ?)
-        AND NOT EXISTS (SELECT 1 FROM order_items WHERE user_id = ? AND game_id = ?)
-      ON DUPLICATE KEY UPDATE
-        qty = LEAST(cart_items.qty + VALUES(qty), 99),
-        updated_at = CURRENT_TIMESTAMP
-    `;
+  INSERT INTO cart_items (user_id, game_id, qty)
+  SELECT ?, ?, 1
+  FROM DUAL
+  WHERE EXISTS (SELECT 1 FROM games WHERE id = ?)
+    AND NOT EXISTS (SELECT 1 FROM order_items WHERE user_id = ? AND game_id = ?)
+  ON DUPLICATE KEY UPDATE
+    qty = LEAST(qty + 1, 99)
+`;
 
     const params = [auth.id, gameId, gameId, auth.id, gameId];
 
