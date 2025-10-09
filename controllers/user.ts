@@ -580,16 +580,15 @@ router.post("/cart/add", async (req, res) => {
   const auth = (req as any).auth as
     | { id: number; role?: "user" | "admin" }
     | undefined;
-  if (!auth) {
+  if (!auth)
     return res.status(401).json({ ok: false, message: "Unauthorized" });
-  }
 
-  // ✅ บล็อก admin (เช็กจาก payload; ถ้าไม่มี role ใน payload ให้ไปดูจาก DB)
+  // ⛔ บล็อก admin
   try {
     let role = auth.role;
     if (!role) {
       const [[u]] = await conn.query<RowDataPacket[]>(
-        `SELECT role FROM users WHERE id = ? LIMIT 1`,
+        "SELECT role FROM users WHERE id=? LIMIT 1",
         [auth.id]
       );
       if (!u)
@@ -607,63 +606,97 @@ router.post("/cart/add", async (req, res) => {
     return res.status(500).json({ ok: false, message: "Server error" });
   }
 
-  const raw = req.body?.gameId;
-  const gameId = Number(raw);
+  const gameId = Number(req.body?.gameId);
   if (!Number.isFinite(gameId) || gameId <= 0) {
     return res.status(400).json({ ok: false, message: "Invalid gameId" });
   }
 
+  const db = await conn.getConnection();
   try {
-    const cx = await conn.getConnection();
-    await cx.beginTransaction();
+    // ลดโอกาส gap/next-key lock
+    await db.query("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED");
 
-    // กันเพิ่มเกมที่มีอยู่แล้วใน library (เกมที่ซื้อแล้ว)
-    const [[own]] = await cx.query<RowDataPacket[]>(
-      `SELECT 1 FROM order_items WHERE user_id=? AND game_id=? LIMIT 1`,
+    // ✅ คำสั่งเดียวจบ: แทรกเฉพาะเมื่อมีเกมอยู่จริงและยังไม่เป็นเจ้าของ
+    // ถ้ามีอยู่ในตะกร้าแล้วจะ UPDATE qty (+1) แบบ atomic
+    const sql = `
+      INSERT INTO cart_items (user_id, game_id, qty)
+      SELECT ?, ?, 1
+      FROM DUAL
+      WHERE EXISTS (SELECT 1 FROM games WHERE id = ?)
+        AND NOT EXISTS (SELECT 1 FROM order_items WHERE user_id = ? AND game_id = ?)
+      ON DUPLICATE KEY UPDATE
+        qty = LEAST(cart_items.qty + VALUES(qty), 99),
+        updated_at = CURRENT_TIMESTAMP
+    `;
+
+    const params = [auth.id, gameId, gameId, auth.id, gameId];
+
+    // retry สั้น ๆ กรณีชน lock/deadlock
+    const execWithRetry = async () => {
+      let n = 0;
+      for (;;) {
+        try {
+          const [r]: any = await db.execute(sql, params);
+          return r;
+        } catch (e: any) {
+          if (
+            (e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") &&
+            n < 3
+          ) {
+            await new Promise((r) => setTimeout(r, 60 * Math.pow(2, n)));
+            n++;
+            continue;
+          }
+          throw e;
+        }
+      }
+    };
+
+    const result: any = await execWithRetry();
+
+    // MySQL semantics:
+    // - insert ใหม่ => affectedRows = 1
+    // - duplicate → update => affectedRows = 2
+    // - guard ไม่ผ่าน (ไม่พบเกม/เป็นเจ้าของแล้ว) => affectedRows = 0
+    if (result.affectedRows === 1) {
+      return res.json({ ok: true, message: "เพิ่มลงตะกร้าแล้ว" });
+    }
+    if (result.affectedRows === 2) {
+      return res.json({ ok: true, message: "เพิ่มจำนวนเกมในตะกร้าแล้ว" });
+    }
+
+    // affectedRows = 0 → หาเหตุผลเพื่อข้อความที่ถูกต้อง
+    const [[g]] = await db.query<RowDataPacket[]>(
+      "SELECT id FROM games WHERE id=? LIMIT 1",
+      [gameId]
+    );
+    if (!g) return res.status(404).json({ ok: false, message: "ไม่พบเกม" });
+
+    const [[own]] = await db.query<RowDataPacket[]>(
+      "SELECT 1 FROM order_items WHERE user_id=? AND game_id=? LIMIT 1",
       [auth.id, gameId]
     );
     if (own) {
-      await cx.rollback();
       return res.status(409).json({
         ok: false,
         message: "คุณเป็นเจ้าของเกมนี้แล้ว ไม่สามารถเพิ่มในตะกร้าได้",
       });
     }
 
-    // เกมมีจริงไหม
-    const [[game]] = await cx.query<RowDataPacket[]>(
-      `SELECT id FROM games WHERE id=? LIMIT 1`,
-      [gameId]
-    );
-    if (!game) {
-      await cx.rollback();
-      return res.status(404).json({ ok: false, message: "ไม่พบเกม" });
+    // กรณีอื่น ๆ (ไม่น่าเกิด)
+    return res
+      .status(409)
+      .json({ ok: false, message: "ไม่สามารถเพิ่มสินค้าลงตะกร้าได้" });
+  } catch (e: any) {
+    if (e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") {
+      return res
+        .status(409)
+        .json({ ok: false, message: "ระบบไม่พร้อม โปรดลองอีกครั้ง" });
     }
-
-    // เช็คว่าเกมนี้อยู่ในตะกร้าหรือยัง
-    const [[cartItem]] = await cx.query<RowDataPacket[]>(
-      `SELECT * FROM cart_items WHERE user_id=? AND game_id=? LIMIT 1`,
-      [auth.id, gameId]
-    );
-
-    if (cartItem) {
-      await cx.query(
-        `UPDATE cart_items SET qty = qty + 1 WHERE user_id = ? AND game_id = ?`,
-        [auth.id, gameId]
-      );
-      await cx.commit();
-      return res.json({ ok: true, message: "เพิ่มจำนวนเกมในตะกร้าแล้ว" });
-    } else {
-      await cx.query(
-        `INSERT INTO cart_items (user_id, game_id, qty) VALUES (?, ?, 1)`,
-        [auth.id, gameId]
-      );
-      await cx.commit();
-      return res.json({ ok: true, message: "เพิ่มลงตะกร้าแล้ว" });
-    }
-  } catch (e) {
     console.error("POST /cart/add error:", e);
     return res.status(500).json({ ok: false, message: "Server error" });
+  } finally {
+    db.release();
   }
 });
 
