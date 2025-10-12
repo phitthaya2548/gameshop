@@ -552,8 +552,6 @@ router.post("/cart/add", async (req, res) => {
   const auth = (req as any).auth as
     | { id: number; role?: "user" | "admin" }
     | undefined;
-
-  // Check if user is authenticated
   if (!auth) {
     return res.status(401).json({ ok: false, message: "Unauthorized" });
   }
@@ -572,6 +570,7 @@ router.post("/cart/add", async (req, res) => {
       role = u.role as "user" | "admin";
     }
 
+
     if (role === "admin") {
       return res.status(403).json({
         ok: false,
@@ -584,6 +583,7 @@ router.post("/cart/add", async (req, res) => {
   }
 
   const gameId = Number(req.body?.gameId);
+
 
   if (!Number.isFinite(gameId) || gameId <= 0) {
     return res.status(400).json({ ok: false, message: "Invalid gameId" });
@@ -598,8 +598,9 @@ router.post("/cart/add", async (req, res) => {
     ON DUPLICATE KEY UPDATE
       qty = CASE WHEN qty < 99 THEN qty + 1 ELSE qty END
   `;
-
+  
   const params = [auth.id, gameId, gameId, auth.id, gameId];
+
 
   const execWithRetry = async (tries = 3) => {
     let n = 0;
@@ -673,6 +674,7 @@ router.post("/cart/add", async (req, res) => {
   }
 });
 
+
 router.delete("/cart/:gameId", async (req, res) => {
   const auth = (req as any).auth as { id: number } | undefined;
   if (!auth)
@@ -687,49 +689,39 @@ router.delete("/cart/:gameId", async (req, res) => {
   const params = [auth.id, gameId];
 
   try {
-    const [result]: any = await conn.execute(sql, params);
+    const execWithRetry = async (tries = 3) => {
+      let n = 0;
+      for (;;) {
+        try {
+          const [r]: any = await conn.execute(sql, params);
+        } catch (e: any) {
+          if (
+            (e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") &&
+            n < tries
+          ) {
+            await new Promise((r) => setTimeout(r, 60 * Math.pow(2, n)));
+            n++;
+            continue;
+          }
+          throw e;
+        }
+      }
+    };
 
-    // ตรวจสอบว่ามีการลบสินค้า
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ ok: false, message: "ไม่พบรายการในตะกร้า" });
+    const result: any = await execWithRetry();
+
+    if (!result.affectedRows) {
+      return res
+        .status(404)
+        .json({ ok: false, message: "ไม่พบรายการในตะกร้า" });
     }
-
-    // รีเฟรชข้อมูลตะกร้า
-    const sqlFetchUpdatedCart = `
-      SELECT
-        ci.game_id AS gameId,
-        COALESCE(ci.qty, 1) AS qty,
-        g.title,
-        g.price,
-        g.images,
-        g.category_name,
-        g.description,
-        g.release_date
-      FROM cart_items ci
-      JOIN games g ON g.id = ci.game_id
-      WHERE ci.user_id = ?
-      ORDER BY ci.id DESC
-    `;
-    const [updatedRows]: any = await conn.query(sqlFetchUpdatedCart, [auth.id]);
-
-    const items = updatedRows.map((r: any) => ({
-      gameId: Number(r.gameId),
-      qty: Number(r.qty || 1),
-      title: r.title,
-      price: Number(r.price || 0),
-      image: toAbsoluteUrl(req, r.images) || null,
-      categoryName: r.category_name,
-      description: r.description,
-      releaseDate: r.release_date,
-    }));
-
-    const subtotal = items.reduce(
-      (s: number, it: any) => s + it.price * it.qty,
-      0
-    );
-
-    return res.json({ ok: true, message: "ลบออกจากตะกร้าแล้ว", items, subtotal });
+    return res.json({ ok: true, message: "ลบออกจากตะกร้าแล้ว" });
   } catch (e: any) {
+    if (e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") {
+      return res
+        .status(409)
+        .json({ ok: false, message: "ระบบไม่พร้อม โปรดลองอีกครั้ง" });
+    }
     console.error("DELETE /cart/:gameId error:", e);
     return res.status(500).json({ ok: false, message: "Server error" });
   }

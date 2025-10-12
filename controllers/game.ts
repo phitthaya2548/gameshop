@@ -726,8 +726,6 @@ router.get("/top-sellers", async (req, res) => {
     const dateStr = String(date ?? "");
     let start: string | null = null;
     let end: string | null = null;
-
-    
     if (period === "day" && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
       start = `${dateStr} 00:00:00`;
       const d = new Date(`${dateStr}T00:00:00Z`);
@@ -743,9 +741,12 @@ router.get("/top-sellers", async (req, res) => {
       const y = Number(dateStr);
       start = `${y}-01-01 00:00:00`;
       end = `${y + 1}-01-01 00:00:00`;
+    } else if (period === "all") {
+      start = null;
+      end = null;
+    } else {
+      return res.status(400).json({ ok: false, message: "Invalid period or date format" });
     }
-
-
     let query = `
       WITH sales AS (
         SELECT
@@ -760,7 +761,15 @@ router.get("/top-sellers", async (req, res) => {
         FROM games g
         LEFT JOIN order_items oi ON oi.game_id = g.id
         LEFT JOIN orders o ON o.id = oi.order_id
-        WHERE o.created_at >= ? AND o.created_at < ?
+        WHERE 1=1
+    `;
+
+    // Only apply the date filter if `start` and `end` are defined
+    if (start && end) {
+      query += ` AND o.created_at >= ? AND o.created_at < ? `;
+    }
+
+    query += `
         GROUP BY g.id
       ),
       ranked AS (
@@ -774,12 +783,13 @@ router.get("/top-sellers", async (req, res) => {
       ORDER BY r.purchases DESC, r.game_id ASC;
     `;
 
-
+    // Define the parameters to pass to the query
     const params: any[] = start && end ? [start, end] : [];
 
-    // Ensure the parameters are passed correctly
+    // Execute the query
     const [rows] = await conn.query<RowDataPacket[]>(query, params);
 
+    // Mapping the query results to the desired format
     const topSellers = rows.map((r: any, idx: number) => {
       const rel = r.images ?? null; // Column name for image
       const imageUrl = rel ? toAbsoluteUrl(req, rel) : "default-image-url.jpg";
