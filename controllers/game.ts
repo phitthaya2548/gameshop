@@ -1,36 +1,49 @@
 import express from "express";
 import fs from "fs";
-import { FieldPacket, ResultSetHeader, RowDataPacket } from "mysql2"; // ไม่ใช้ QueryResult
+import { FieldPacket, ResultSetHeader, RowDataPacket } from "mysql2";
 import { conn } from "../db";
 import { saveImageBufferToUploads, toAbsoluteUrl, upload } from "./upload";
 export const router = express.Router();
-// ✅ ใช้ชื่อไม่ซ้ำกับของเดิม
+
 router.post("/addgames", upload.single("image"), async (req, res) => {
-  let savedPath: string | undefined; // เก็บ path ไฟล์ที่เพิ่งเซฟ เพื่อ cleanup ถ้า error
+  let savedPath: string | undefined;
+
   try {
     const { title, price, description, releaseDate } = req.body ?? {};
+    const MIN_CATEGORIES = 5;
 
-    // ---- Validate
     if (typeof title !== "string" || title.trim().length < 2) {
-      return res.status(400).json({ ok: false, message: "กรุณากรอกชื่อเกมอย่างน้อย 2 ตัวอักษร" });
+      return res
+        .status(400)
+        .json({ ok: false, message: "กรุณากรอกชื่อเกมอย่างน้อย 2 ตัวอักษร" });
     }
+
     const priceNum = Number(price);
     if (!Number.isFinite(priceNum) || priceNum < 0) {
       return res.status(400).json({ ok: false, message: "ราคาไม่ถูกต้อง" });
     }
 
-    // ---- รับ categories (array / JSON / CSV / fallback from categoryName)
-    const rawCats = req.body.categories ?? req.body.categoryNames ?? req.body.categoryName;
+    const rawCats =
+      req.body.categories ?? req.body.categoryNames ?? req.body.categoryName;
     const categories = _catNormalize(rawCats);
-    if (!categories.length) {
-      return res.status(400).json({ ok: false, message: "กรุณาใส่หมวดหมู่เกมอย่างน้อย 1 หมวดหมู่" });
-    }
-    if (categories.some((n) => n.length < 2)) {
-      return res.status(400).json({ ok: false, message: "ชื่อหมวดหมู่ต้องยาวอย่างน้อย 2 ตัวอักษร" });
+
+    if (categories.length < MIN_CATEGORIES) {
+      return res.status(400).json({
+        ok: false,
+        message: `ต้องมีหมวดหมู่อย่างน้อย ${MIN_CATEGORIES} หมวดหมู่`,
+        detail:
+          "ส่งเป็น array/CSV ก็ได้ เช่น Action, Adventure, RPG, Simulation, Sports",
+      });
     }
 
-    // ---- Canonical CSV (trim, unique, sort) เพื่อให้ชน unique แบบคงที่
-    const categoryCsv = _catToCsvSorted(categories); // ex. "Action, Horror"
+    if (categories.some((n) => n.length < 2)) {
+      return res.status(400).json({
+        ok: false,
+        message: "ชื่อหมวดหมู่ต้องยาวอย่างน้อย 2 ตัวอักษร",
+      });
+    }
+
+    const categoryCsv = _catToCsvSorted(categories);
     if (categoryCsv.length > 80) {
       return res.status(400).json({
         ok: false,
@@ -38,14 +51,14 @@ router.post("/addgames", upload.single("image"), async (req, res) => {
       });
     }
 
-    // ---- รูปภาพ
     const file = req.file;
     if (!file) {
-      return res.status(400).json({ ok: false, message: "กรุณาแนบรูปปก (ไฟล์ภาพ)" });
+      return res
+        .status(400)
+        .json({ ok: false, message: "กรุณาแนบรูปปก (ไฟล์ภาพ)" });
     }
     savedPath = saveImageBufferToUploads(file.buffer, file.mimetype);
 
-    // ---- วันที่ (YYYY-MM-DD Asia/Bangkok)
     const releaseDateValue =
       typeof releaseDate === "string" && releaseDate.trim()
         ? releaseDate.trim()
@@ -60,22 +73,18 @@ router.post("/addgames", upload.single("image"), async (req, res) => {
             .reverse()
             .join("-");
 
-    // ---- Pre-check กันชน unique (เงียบ/เร็ว)
     const [[dup]] = await conn.query<RowDataPacket[]>(
       `SELECT id FROM games WHERE title = ? AND category_name = ? LIMIT 1`,
       [title.trim(), categoryCsv]
     );
     if (dup) {
-      // cleanup ไฟล์ที่เพิ่งเซฟ
       _safeUnlink(savedPath);
       return res.status(409).json({
         ok: false,
         message: "มีเกมชื่อนี้ในชุดหมวดหมู่เดียวกันอยู่แล้ว",
-        hint: "ให้แก้ชื่อเกม หรือปรับชุดหมวดหมู่ (เพิ่ม/ลบ/เรียงต่างไม่ได้ผล เพราะถูก normalize แล้ว)",
       });
     }
 
-    // ---- Insert
     const [rs] = await conn.query<ResultSetHeader>(
       `INSERT INTO games
          (title, price, category_name, images, description, release_date)
@@ -83,39 +92,32 @@ router.post("/addgames", upload.single("image"), async (req, res) => {
       [
         title.trim(),
         priceNum,
-        categoryCsv,            // เก็บ CSV แบบ canonical
+        categoryCsv,
         savedPath,
         typeof description === "string" ? description : null,
         releaseDateValue,
       ]
     );
 
-    // ---- Select กลับมาส่ง
     const [[row]] = await conn.query<RowDataPacket[]>(
-      `SELECT id, title, price, category_name AS categoryName, images, description,
-              release_date AS releaseDate, created_at AS createdAt, updated_at AS updatedAt
+      `SELECT id, title, price, category_name AS categoryName, images,
+              description, release_date AS releaseDate,
+              created_at AS createdAt, updated_at AS updatedAt
        FROM games
-       WHERE id = ? 
+       WHERE id = ?
        LIMIT 1`,
       [rs.insertId]
     );
 
-    const imageUrl = toAbsoluteUrl(req, row.images);
+    const imageUrl = toAbsoluteUrl(req, row.image);
     const categoriesArr = _catFromCsv(row.categoryName);
 
     return res.status(201).json({
       ok: true,
-      game: {
-        ...row,
-        imageUrl,
-        categories: categoriesArr,
-      },
+      game: { ...row, imageUrl, categories: categoriesArr },
     });
   } catch (e: any) {
-    // ถ้า insert fail ให้ลบไฟล์ที่เพิ่งเซฟ (กันไฟล์ขยะ)
     if (savedPath) _safeUnlink(savedPath);
-
-    // ชน unique index ก็รายงาน 409
     if (e?.code === "ER_DUP_ENTRY") {
       return res.status(409).json({
         ok: false,
@@ -123,13 +125,11 @@ router.post("/addgames", upload.single("image"), async (req, res) => {
         detail: e?.sqlMessage ?? String(e),
       });
     }
-
     console.error("POST /addgames error:", e);
     return res.status(500).json({ ok: false, message: "Server error" });
   }
 });
 
-/* ---------- Helpers ---------- */
 function _catNormalize(input: unknown): string[] {
   if (!input) return [];
   if (Array.isArray(input)) return _catClean(input);
@@ -138,16 +138,21 @@ function _catNormalize(input: unknown): string[] {
       const parsed = JSON.parse(input);
       if (Array.isArray(parsed)) return _catClean(parsed);
     } catch {}
-    return _catClean(input.split(",")); // CSV
+    return _catClean(input.split(","));
   }
   return [];
 }
 function _catToCsvSorted(categories: string[]): string {
-  return _catClean(categories).sort((a, b) => a.localeCompare(b)).join(", ");
+  return _catClean(categories)
+    .sort((a, b) => a.localeCompare(b))
+    .join(", ");
 }
 function _catFromCsv(csv?: string | null): string[] {
   if (!csv) return [];
-  return csv.split(",").map((s) => s.trim()).filter(Boolean);
+  return csv
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 function _catClean(arr: any[]): string[] {
   const set = new Set(
@@ -166,10 +171,14 @@ function _safeUnlink(p?: string) {
 
 router.get("/search", async (req, res) => {
   try {
-    const title = typeof req.query.title === "string" ? req.query.title.trim() : "";
-    // รับหลายรูปแบบ: categories, categories[], categoryName (CSV/เดี่ยว)
-    const rawCats = (req.query as any).categories ?? (req.query as any)["categories[]"] ?? req.query.categoryName;
-    const cats = normalizeCats(rawCats); // => string[]
+    const title =
+      typeof req.query.title === "string" ? req.query.title.trim() : "";
+
+    const rawCats =
+      (req.query as any).categories ??
+      (req.query as any)["categories[]"] ??
+      req.query.categoryName;
+    const cats = normalizeCats(rawCats);
 
     let sql = `SELECT id, title, price, category_name, images FROM games WHERE 1=1`;
     const params: any[] = [];
@@ -180,8 +189,6 @@ router.get("/search", async (req, res) => {
     }
 
     if (cats.length) {
-      // เป็นเงื่อนไข OR: มีอย่างน้อย 1 หมวดที่ตรง
-      // ถ้าต้องการ AND ให้เปลี่ยน join(" AND ") ได้
       const orConds = cats
         .map(() => `FIND_IN_SET(?, REPLACE(category_name, ', ', ','))`)
         .join(" OR ");
@@ -189,22 +196,27 @@ router.get("/search", async (req, res) => {
       params.push(...cats);
     }
 
-    // (เติม order ตามต้องการ)
     sql += ` ORDER BY id DESC`;
 
-    const [rows]: [RowDataPacket[], FieldPacket[]] = await conn.query(sql, params);
+    const [rows]: [RowDataPacket[], FieldPacket[]] = await conn.query(
+      sql,
+      params
+    );
 
     if (!rows.length) {
-      return res.status(404).json({ ok: false, message: "ไม่พบเกมที่ตรงกับเงื่อนไขการค้นหา" });
+      return res
+        .status(404)
+        .json({ ok: false, message: "ไม่พบเกมที่ตรงกับเงื่อนไขการค้นหา" });
     }
     return res.json({ ok: true, games: rows });
   } catch (error) {
     console.error("Error searching games:", error);
-    return res.status(500).json({ ok: false, message: "เกิดข้อผิดพลาดในการค้นหาเกม" });
+    return res
+      .status(500)
+      .json({ ok: false, message: "เกิดข้อผิดพลาดในการค้นหาเกม" });
   }
 });
 
-/* ===== Helpers ===== */
 function normalizeCats(input: any): string[] {
   if (!input) return [];
   if (Array.isArray(input)) return clean(input);
@@ -213,17 +225,18 @@ function normalizeCats(input: any): string[] {
       const parsed = JSON.parse(input);
       if (Array.isArray(parsed)) return clean(parsed);
     } catch {}
-    return clean(input.split(",")); // CSV
+    return clean(input.split(","));
   }
   return [];
 }
 function clean(arr: any[]): string[] {
   return Array.from(
-    new Set(arr.map(v => (typeof v === "string" ? v.trim() : "")).filter(Boolean))
+    new Set(
+      arr.map((v) => (typeof v === "string" ? v.trim() : "")).filter(Boolean)
+    )
   );
 }
 
-// ✅ Partial update เฉพาะฟิลด์ที่มีใน request
 router.patch("/games/:id", upload.single("image"), async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -231,20 +244,19 @@ router.patch("/games/:id", upload.single("image"), async (req, res) => {
       return res.status(400).json({ ok: false, message: "Invalid id" });
     }
 
-    // โหลดข้อมูลเดิม
     const [[current]] = await conn.query<RowDataPacket[]>(
       "SELECT * FROM games WHERE id = ? LIMIT 1",
       [id]
     );
-    if (!current) return res.status(404).json({ ok: false, message: "Not Found" });
+    if (!current)
+      return res.status(404).json({ ok: false, message: "Not Found" });
 
-    // ---------- รับค่าที่อาจถูกส่งมา ----------
-    let { title, price, categoryName, description, releaseDate } = req.body ?? {};
+    const MIN_CATEGORIES = 5;
 
-    // 1) เตรียม categories (array → CSV แบบ canonical)
-    // รองรับ: categories (array/ซ้ำคีย์), categories[], categoryNames, categoryName (string/CSV/JSON)
+    let { title, price, categoryName, description, releaseDate } =
+      req.body ?? {};
+
     let categoryCsvToSet: string | undefined;
-
     const rawCats =
       (req.body as any).categories ??
       (req.body as any)["categories[]"] ??
@@ -252,20 +264,37 @@ router.patch("/games/:id", upload.single("image"), async (req, res) => {
 
     if (typeof rawCats !== "undefined") {
       const cats = _catNormalize(rawCats);
-      if (!cats.length) {
-        return res.status(400).json({ ok: false, message: "กรุณาเลือกหมวดหมู่อย่างน้อย 1 รายการ" });
+
+      if (cats.length < MIN_CATEGORIES) {
+        return res.status(400).json({
+          ok: false,
+          message: `ต้องมีหมวดหมู่อย่างน้อย ${MIN_CATEGORIES} หมวดหมู่`,
+        });
       }
-      categoryCsvToSet = _catToCsvSorted(cats); // e.g. "Action, Horror"
+      if (cats.some((n) => n.length < 2)) {
+        return res.status(400).json({
+          ok: false,
+          message: "ชื่อหมวดหมู่ต้องยาวอย่างน้อย 2 ตัวอักษร",
+        });
+      }
+      categoryCsvToSet = _catToCsvSorted(cats);
     } else if (typeof categoryName !== "undefined") {
-      // ยังรองรับการส่งเป็น categoryName (CSV/JSON/ชื่อเดียว)
       const cats = _catNormalize(categoryName);
-      if (!cats.length) {
-        return res.status(400).json({ ok: false, message: "กรุณาเลือกหมวดหมู่อย่างน้อย 1 รายการ" });
+      if (cats.length < MIN_CATEGORIES) {
+        return res.status(400).json({
+          ok: false,
+          message: `ต้องมีหมวดหมู่อย่างน้อย ${MIN_CATEGORIES} หมวดหมู่`,
+        });
+      }
+      if (cats.some((n) => n.length < 2)) {
+        return res.status(400).json({
+          ok: false,
+          message: "ชื่อหมวดหมู่ต้องยาวอย่างน้อย 2 ตัวอักษร",
+        });
       }
       categoryCsvToSet = _catToCsvSorted(cats);
     }
 
-    // กันความยาวล้นสคีม่าเดิมถ้าคุณใช้ VARCHAR(80) (ปรับตามจริง)
     if (categoryCsvToSet && categoryCsvToSet.length > 80) {
       return res.status(400).json({
         ok: false,
@@ -273,23 +302,22 @@ router.patch("/games/:id", upload.single("image"), async (req, res) => {
       });
     }
 
-    // 2) Validate field อื่น ๆ + สร้างชุด UPDATE
     const set: string[] = [];
     const params: any[] = [];
 
-    // title
     let nextTitle = current.title as string;
     if (typeof title !== "undefined") {
       title = String(title).trim();
       if (title.length < 2) {
-        return res.status(400).json({ ok: false, message: "ชื่อเกมสั้นเกินไป" });
+        return res
+          .status(400)
+          .json({ ok: false, message: "ชื่อเกมสั้นเกินไป" });
       }
       set.push("title = ?");
       params.push(title);
       nextTitle = title;
     }
 
-    // price
     if (typeof price !== "undefined") {
       const pn = Number(price);
       if (!Number.isFinite(pn) || pn < 0) {
@@ -299,7 +327,6 @@ router.patch("/games/:id", upload.single("image"), async (req, res) => {
       params.push(pn);
     }
 
-    // category_name (CSV)
     let nextCategoryCsv = current.category_name as string;
     if (typeof categoryCsvToSet !== "undefined") {
       set.push("category_name = ?");
@@ -307,30 +334,34 @@ router.patch("/games/:id", upload.single("image"), async (req, res) => {
       nextCategoryCsv = categoryCsvToSet;
     }
 
-    // description
     if (typeof description !== "undefined") {
       set.push("description = ?");
       params.push(description === null ? null : String(description).trim());
     }
 
-    // release_date
     if (typeof releaseDate !== "undefined") {
-      set.push("release_date = ?");
-      params.push(releaseDate ? String(releaseDate).trim() : null);
+      const val = String(releaseDate).trim();
+      if (val) {
+        set.push("release_date = ?");
+        params.push(val);
+      }
     }
 
-    // image ใหม่
     if (req.file) {
-      const newPath = saveImageBufferToUploads(req.file.buffer, req.file.mimetype);
+      const newPath = saveImageBufferToUploads(
+        req.file.buffer,
+        req.file.mimetype
+      );
       set.push("images = ?");
       params.push(newPath);
     }
 
     if (set.length === 0) {
-      return res.status(400).json({ ok: false, message: "ไม่มีฟิลด์ให้อัปเดต" });
+      return res
+        .status(400)
+        .json({ ok: false, message: "ไม่มีฟิลด์ให้อัปเดต" });
     }
 
-    // 3) กันชน unique (title, category_name)
     const [[dup]] = await conn.query<RowDataPacket[]>(
       `SELECT id FROM games WHERE title = ? AND category_name = ? AND id <> ? LIMIT 1`,
       [nextTitle, nextCategoryCsv, id]
@@ -342,18 +373,14 @@ router.patch("/games/:id", upload.single("image"), async (req, res) => {
       });
     }
 
-    // 4) ทำการอัปเดต
     params.push(id);
     await conn.query(`UPDATE games SET ${set.join(", ")} WHERE id = ?`, params);
 
-    // 5) ตอบกลับ
     const [[updated]] = await conn.query<RowDataPacket[]>(
       "SELECT * FROM games WHERE id = ? LIMIT 1",
       [id]
     );
     const imageUrl = toAbsoluteUrl(req, updated.images);
-
-    // แปลง CSV -> array เพื่อให้ฟรอนต์ใช้สะดวก
     const categoriesArr = _catFromCsv(updated.category_name);
 
     res.json({
@@ -382,19 +409,16 @@ router.delete("/games/:id", async (req, res) => {
         .json({ ok: false, message: "ไม่พบเกมที่ต้องการลบ" });
     }
 
-    // Check if image exists and delete it (using fs.sync)
     const imagePath = gameToDelete.images;
     if (imagePath && fs.existsSync(imagePath)) {
-      // Use fs from 'fs' for synchronous operations
       try {
-        fs.unlinkSync(imagePath); // Use fs.unlinkSync to delete file synchronously
+        fs.unlinkSync(imagePath);
         console.log("Image file deleted:", imagePath);
       } catch (err) {
         console.error("Error deleting image file:", err);
       }
     }
 
-    // Delete the game from the database
     await conn.query(`DELETE FROM games WHERE id = ?`, [gameId]);
 
     const [[checkGame]] = await conn.query<RowDataPacket[]>(
@@ -426,76 +450,65 @@ router.get("/games/:id", async (req, res) => {
       return res.status(400).json({ ok: false, message: "Invalid id" });
     }
 
-    // ---------- พารามิเตอร์สำหรับแรงก์ ----------
-    const rawMode = (req.query.mode ?? "").toString().toLowerCase().trim();
-    const mode = !rawMode || rawMode === "all" ? "all" : rawMode; // all|day|month|year
-    const dateStr = (req.query.date ?? "").toString().trim();
-    const by: "count" | "revenue" =
-      req.query.by === "revenue" ? "revenue" : "count";
+    // Retrieve game details from the database
+    const [rows] = await conn.query<RowDataPacket[]>(`
+      SELECT id, title, price, category_name AS category_name, description, images, release_date AS releaseDate
+      FROM games
+      WHERE id = ? 
+      LIMIT 1
+    `, [id]);
 
-    let range: { start: string; end: string } | null = null;
-    if (mode !== "all") {
-      range = calcRange(mode, dateStr);
-      if (!range) {
-        return res.status(400).json({
-          ok: false,
-          message: "mode/date ไม่ถูกต้อง (mode=day|month|year, date ตามรูปแบบของ mode)",
-        });
-      }
-    }
-    const hasRange = !!range;
-
-    // ---------- โหลดข้อมูลเกมพื้นฐาน ----------
-    const [rows] = await conn.query<RowDataPacket[]>(
-      `SELECT id, title, price, category_name AS category_name, description, images,
-              release_date AS releaseDate
-       FROM games
-       WHERE id = ? LIMIT 1`,
-      [id]
-    );
     if (!rows.length) {
       return res.status(404).json({ ok: false, message: "Not Found" });
     }
-    const g = rows[0];
-    const imageUrl = toAbsoluteUrl(req, g.images);
 
-    // ---------- คำนวณยอดขาย/รายได้ของ "เกมนี้" ----------
-    // ใช้ LEFT JOIN + เงื่อนไขช่วงเวลาใน ON เพื่อให้เกมที่ไม่มีออเดอร์ยังได้ผลลัพธ์ (0)
-    const timeJoin =
-      hasRange ? `AND o.created_at >= ? AND o.created_at < ?` : ``;
+    const game = rows[0];
+    const imageUrl = toAbsoluteUrl(req, game.images);
 
-    const [selfStatRows] = await conn.query<RowDataPacket[]>(
-      `
+    // Retrieve purchase stats for the game (number of purchases and revenue)
+    const [selfStatRows] = await conn.query<RowDataPacket[]>(`
       SELECT
         g.id AS game_id,
-        COALESCE(COUNT(oi.id), 0)           AS purchases,
-        COALESCE(SUM(oi.unit_price), 0)     AS revenue
+        COALESCE(COUNT(oi.id), 0) AS purchases,
+        COALESCE(SUM(oi.unit_price), 0) AS revenue
       FROM games g
       LEFT JOIN order_items oi ON oi.game_id = g.id
-      LEFT JOIN orders o       ON o.id = oi.order_id ${timeJoin}
+      LEFT JOIN orders o ON o.id = oi.order_id
       WHERE g.id = ?
       GROUP BY g.id
-      `,
-      hasRange ? [range!.start, range!.end, id] : [id]
-    );
+    `, [id]);
+
     const selfStat = selfStatRows[0] ?? {
       game_id: id,
       purchases: 0,
       revenue: 0,
     };
 
-    // ---------- คำนวณ "อันดับ" ของเกมนี้ ----------
-    // ทำตารางยอดขายของทุกเกมในช่วงเดียวกัน แล้ว rank ทั้งระบบ
-    const [rankRows] = await conn.query<RowDataPacket[]>(
-      `
+    // If there are no purchases, no need to calculate ranking
+    if (selfStat.purchases === 0) {
+      return res.json({
+        id: game.id,
+        title: game.title,
+        price: Number(game.price),
+        category_name: game.category_name ?? "",
+        description: game.description ?? "",
+        releaseDate: game.releaseDate ?? null,
+        images: imageUrl ?? null,
+        categories: csvToArray(game.category_name),
+        ranking: "", // No ranking if no purchases
+      });
+    }
+
+    // Rank the games based on the number of purchases
+    const [rankRows] = await conn.query<RowDataPacket[]>(`
       WITH sales AS (
         SELECT
           g.id AS game_id,
-          COALESCE(COUNT(oi.id), 0)       AS purchases,
+          COALESCE(COUNT(oi.id), 0) AS purchases,
           COALESCE(SUM(oi.unit_price), 0) AS revenue
         FROM games g
         LEFT JOIN order_items oi ON oi.game_id = g.id
-        LEFT JOIN orders o       ON o.id = oi.order_id ${timeJoin}
+        LEFT JOIN orders o ON o.id = oi.order_id
         GROUP BY g.id
       ),
       ranked AS (
@@ -503,47 +516,36 @@ router.get("/games/:id", async (req, res) => {
           game_id,
           purchases,
           revenue,
-          RANK() OVER (ORDER BY purchases DESC, revenue DESC, game_id ASC) AS rank_by_count,
-          RANK() OVER (ORDER BY revenue   DESC, purchases DESC, game_id ASC) AS rank_by_revenue
+          RANK() OVER (ORDER BY purchases DESC, revenue DESC, game_id ASC) AS rank_by_count  -- Rank by purchases
         FROM sales
       )
-      SELECT r.*, (SELECT COUNT(*) FROM sales) AS population
+      SELECT r.*
       FROM ranked r
       WHERE r.game_id = ?
-      `,
-      hasRange ? [range!.start, range!.end, id] : [id]
-    );
+      LIMIT 5;  -- Limit the result to top 5 games
+    `, [id]);
+
     const rank = rankRows[0] ?? {
       rank_by_count: null,
-      rank_by_revenue: null,
-      population: null,
       purchases: 0,
       revenue: 0,
     };
 
-    // ---------- ตอบกลับ (โครงสร้างเดิม + เพิ่ม ranking) ----------
-    return res.json({
-      id: g.id,
-      title: g.title,
-      price: Number(g.price),
-      category_name: g.category_name ?? "",
-      description: g.description ?? "",
-      releaseDate: g.releaseDate ?? null,
-      images: imageUrl ?? null,
+    // If the game rank exceeds 5, show an empty string or skip the rank.
+    const ranking = rank.rank_by_count && rank.rank_by_count <= 5
+      ? Number(rank.rank_by_count)
+      : "";  // If rank is above 5, show empty
 
-      // เพิ่มข้อมูลที่ใช้กับหน้าแสดงอันดับ
-      categories: csvToArray(g.category_name),
-      ranking: {
-        mode,
-        date: mode === "all" ? null : dateStr,
-        by,
-        period: hasRange ? { start: range!.start, end: range!.end } : null,
-        purchases: Number(selfStat.purchases || 0),
-        revenue: Number(selfStat.revenue || 0),
-        rankByCount: rank.rank_by_count ? Number(rank.rank_by_count) : null,
-        rankByRevenue: rank.rank_by_revenue ? Number(rank.rank_by_revenue) : null,
-        population: rank.population ? Number(rank.population) : null,
-      },
+    return res.json({
+      id: game.id,
+      title: game.title,
+      price: Number(game.price),
+      category_name: game.category_name ?? "",
+      description: game.description ?? "",
+      releaseDate: game.releaseDate ?? null,
+      images: imageUrl ?? null,
+      categories: csvToArray(game.category_name),
+      ranking,  // Show rank if available and not above 5
     });
   } catch (e) {
     console.error("GET /games/:id error:", e);
@@ -575,24 +577,20 @@ router.get("/games", async (req, res) => {
 
 router.get("/stats/ranking", async (req, res) => {
   try {
-    // ===== พารามิเตอร์ =====
-    const _mode = String(req.query.mode || "").toLowerCase(); // all | day | month | year | ''(ว่าง)
-    const dateStr = String(req.query.date || "");             // อาจว่าง
+    const _mode = String(req.query.mode || "").toLowerCase();
+    const dateStr = String(req.query.date || "");
     const by = req.query.by === "revenue" ? "revenue" : "count";
     const fillZeros = String(req.query.fillZeros || "0") === "1";
 
     const limitReq = Number(req.query.limit) || 5;
-    const limit = Math.max(5, Math.min(limitReq, 100));       // อย่างน้อย 5
+    const limit = Math.max(5, Math.min(limitReq, 100));
 
-    // หมวดหมู่: categories[]=, categories=, category=, categoryName=
     const rawCats =
-      (req.query as any).categories ??
-      (req.query as any).category ??
+      (req.query as any).categories ?? 
+      (req.query as any).category ?? 
       (req.query as any).categoryName;
     const categories = normalizeCats(rawCats);
 
-    // ===== โหมดเวลา =====
-    // isAll = ไม่ระบุ mode/date, หรือระบุ mode=all → ไม่กรองเวลา
     const isAll = !_mode || _mode === "all";
     const mode = isAll ? "all" : _mode;
 
@@ -602,111 +600,79 @@ router.get("/stats/ranking", async (req, res) => {
       if (!range) {
         return res.status(400).json({
           ok: false,
-          message: "mode/date ไม่ถูกต้อง (mode=day|month|year, date ตามรูปแบบของ mode)",
+          message:
+            "mode/date ไม่ถูกต้อง (mode=day|month|year, date ตามรูปแบบของ mode)",
         });
       }
     }
-    const hasRange = !!range;
 
-    // ===== เงื่อนไข WHERE รวม (เวลา + หมวด) =====
+    // สร้าง WHERE/params สำหรับ filter หมวดหมู่ (เวลาถูกย้ายไปไว้ใน JOIN)
     const conds: string[] = [];
     const params: any[] = [];
 
-    if (hasRange) {
-      conds.push(`o.created_at >= ? AND o.created_at < ?`);
-      params.push(range!.start, range!.end);
-    }
     if (categories.length) {
       conds.push(
-        `(${categories.map(() =>
-          `FIND_IN_SET(?, REPLACE(g.category_name, ', ', ','))`
-        ).join(" OR ")})`
+        `(${categories
+          .map(() => `FIND_IN_SET(?, REPLACE(g.category_name, ', ', ','))`)
+          .join(" OR ")})`
       );
       params.push(...categories);
     }
     const whereSql = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
 
-    // ===== ORDER BY =====
+    // ORDER หลักตาม "by"
     const orderSQL =
       by === "revenue"
-        ? `ORDER BY revenue DESC, purchases DESC`
-        : `ORDER BY purchases DESC, revenue DESC`;
+        ? `ORDER BY revenue DESC, purchases DESC, game_id ASC`
+        : `ORDER BY purchases DESC, revenue DESC, game_id ASC`;
 
-    // ===== ดึงข้อมูล =====
-    let rows: RowDataPacket[];
+    // สร้างส่วนเงื่อนไขเวลาสำหรับ JOIN orders (ไม่ทำลาย LEFT JOIN)
+    const joinTimeSQL = !range
+      ? "" // ทั้งช่วงเวลา = ไม่กรองเวลา
+      : "AND (o.created_at >= ? AND o.created_at < ?)";
 
-    if (!fillZeros) {
-      // เฉพาะเกมที่ "มีขาย" ในช่วงนั้น (หรือทั้งหมดถ้า isAll)
-      const sql = `
-        SELECT
-          oi.game_id,
-          g.title,
-          g.price,
-          g.images,
-          g.category_name,
-          COUNT(*)           AS purchases,
-          SUM(oi.unit_price) AS revenue,
-          MIN(o.created_at)  AS first_sale_at,
-          MAX(o.created_at)  AS last_sale_at
-        FROM order_items oi
-        JOIN orders o ON o.id = oi.order_id
-        JOIN games  g ON g.id = oi.game_id
-        ${whereSql}
-        GROUP BY oi.game_id
-        ${orderSQL}
-        LIMIT ?
-      `;
-      const [rs] = await conn.query<RowDataPacket[]>(sql, [...params, limit]);
-      rows = rs;
-    } else {
-      // ปาดให้ครบด้วยยอด 0: รวมยอดใน CTE sales แล้ว LEFT JOIN games
-      const timeWhereInCTE = hasRange ? `WHERE o.created_at >= ? AND o.created_at < ?` : ``;
-      const catWhereOuter = categories.length
-        ? `WHERE ${categories.map(() =>
-            `FIND_IN_SET(?, REPLACE(g.category_name, ', ', ','))`
-          ).join(" OR ")}`
-        : ``;
+    // params เวลาต้องต่อท้าย (ใช้ใน JOIN)
+    if (range) {
+      params.push(range.start, range.end);
+    }
 
-      const sql = `
-        WITH sales AS (
-          SELECT
-            oi.game_id,
-            COUNT(*)           AS purchases,
-            SUM(oi.unit_price) AS revenue,
-            MIN(o.created_at)  AS first_sale_at,
-            MAX(o.created_at)  AS last_sale_at
-          FROM order_items oi
-          JOIN orders o ON o.id = oi.order_id
-          ${timeWhereInCTE}
-          GROUP BY oi.game_id
-        )
+    const sql = `
+      WITH sales AS (
         SELECT
           g.id AS game_id,
           g.title,
-          g.price,
           g.images,
           g.category_name,
-          COALESCE(sales.purchases, 0) AS purchases,
-          COALESCE(sales.revenue,   0) AS revenue,
-          sales.first_sale_at,
-          sales.last_sale_at
+          g.price AS price,
+          COUNT(oi.id) AS purchases,  -- จำนวนการซื้อ
+          COALESCE(SUM(oi.unit_price), 0) AS revenue,  -- ยอดขายรวม
+          MIN(o.created_at) AS first_sale_at,
+          MAX(o.created_at) AS last_sale_at
         FROM games g
-        LEFT JOIN sales ON sales.game_id = g.id
-        ${catWhereOuter}
-        ${orderSQL}
-        LIMIT ?
-      `;
+        LEFT JOIN order_items oi
+          ON oi.game_id = g.id
+        LEFT JOIN orders o
+          ON o.id = oi.order_id
+          ${joinTimeSQL}                 -- เงื่อนไขเวลาอยู่ใน JOIN
+        ${whereSql}                      -- เงื่อนไขหมวดหมู่
+        GROUP BY g.id
+        HAVING COUNT(oi.id) > 0          -- กรองเฉพาะเกมที่มียอดขาย (purchases > 0)
+      ),
+      ranked AS (
+        SELECT
+          s.*,
+          RANK() OVER (ORDER BY s.purchases DESC, s.game_id ASC) AS rank_by_count  -- จัดอันดับจากจำนวนการซื้อ
+        FROM sales s
+      )
+      SELECT *
+      FROM ranked
+      ${fillZeros ? "" : "WHERE purchases > 0"}   -- เลือกตัด 0 ออกหรือไม่
+      ${orderSQL}
+      LIMIT ${limit};
+    `;
 
-      const paramsCTE: any[] = [];
-      if (hasRange) paramsCTE.push(range!.start, range!.end); // ของ CTE มาก่อน
-      if (categories.length) paramsCTE.push(...categories);    // แล้วของ outer WHERE
-      paramsCTE.push(limit);
+    const [rows] = await conn.query<RowDataPacket[]>(sql, params);
 
-      const [rs] = await conn.query<RowDataPacket[]>(sql, paramsCTE);
-      rows = rs;
-    }
-
-    // ===== ตอบกลับ =====
     const items = rows.map((r, idx) => {
       const imageUrl =
         typeof toAbsoluteUrl === "function" ? toAbsoluteUrl(req, r.images) : r.images;
@@ -716,21 +682,22 @@ router.get("/stats/ranking", async (req, res) => {
         title: r.title,
         price: Number(r.price ?? 0),
         purchases: Number(r.purchases ?? 0),
-        revenue: Number(r.revenue ?? 0),
+        revenue: Number(r.revenue ?? 0), // ยอดขายรวม
         categoryName: r.category_name,
         categories: csvToArray(r.category_name),
         image: r.images,
         imageUrl,
         firstSaleAt: r.first_sale_at,
         lastSaleAt: r.last_sale_at,
-        period: hasRange ? { start: range!.start, end: range!.end } : null,
+        period: range ? { start: range.start, end: range.end } : null,
+        rankByCount: r.rank_by_count,
       };
     });
 
     return res.json({
       ok: true,
-      mode,                 // 'all' | 'day' | 'month' | 'year'
-      date: hasRange ? dateStr : null,
+      mode,
+      date: range ? dateStr : null,
       by,
       limit,
       count: items.length,
@@ -743,24 +710,35 @@ router.get("/stats/ranking", async (req, res) => {
 });
 
 
-function calcRange(mode: string, dateStr: string): { start: string; end: string } | null {
+
+function calcRange(
+  mode: string,
+  dateStr: string
+): { start: string; end: string } | null {
   const pad = (n: number) => String(n).padStart(2, "0");
   if (mode === "day") {
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
     if (!m) return null;
-    const y = +m[1], mo = +m[2], d = +m[3];
+    const y = +m[1],
+      mo = +m[2],
+      d = +m[3];
     const start = `${y}-${pad(mo)}-${pad(d)} 00:00:00`;
     const dt = new Date(Date.UTC(y, mo - 1, d + 1));
-    const end = `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())} 00:00:00`;
+    const end = `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(
+      dt.getUTCDate()
+    )} 00:00:00`;
     return { start, end };
   }
   if (mode === "month") {
     const m = /^(\d{4})-(\d{2})$/.exec(dateStr);
     if (!m) return null;
-    const y = +m[1], mo = +m[2];
+    const y = +m[1],
+      mo = +m[2];
     const start = `${y}-${pad(mo)}-01 00:00:00`;
     const dt = new Date(Date.UTC(y, mo, 1));
-    const end = `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())} 00:00:00`;
+    const end = `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(
+      dt.getUTCDate()
+    )} 00:00:00`;
     return { start, end };
   }
   if (mode === "year") {
@@ -775,5 +753,94 @@ function calcRange(mode: string, dateStr: string): { start: string; end: string 
 }
 function csvToArray(csv?: string | null): string[] {
   if (!csv) return [];
-  return String(csv).split(",").map((s) => s.trim()).filter(Boolean);
+  return String(csv)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
+router.get("/top-sellers", async (req, res) => {
+  try {
+    const { period = "all", date = "" } = req.query;
+    const dateStr = String(date ?? "");
+    let start: string | null = null;
+    let end: string | null = null;
+
+    // สร้างช่วงเวลาแบบ [start, end) ครอบคลุมเต็มวัน/เดือน/ปี
+    if (period === "day" && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      start = `${dateStr} 00:00:00`;
+      const d = new Date(`${dateStr}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + 1);
+      end = d.toISOString().slice(0, 10) + " 00:00:00";
+    } else if (period === "month" && /^\d{4}-\d{2}$/.test(dateStr)) {
+      const [y, m] = dateStr.split("-").map(Number);
+      const startD = new Date(Date.UTC(y, m - 1, 1));
+      const endD = new Date(Date.UTC(y, m, 1));
+      start = startD.toISOString().slice(0, 10) + " 00:00:00";
+      end = endD.toISOString().slice(0, 10) + " 00:00:00";
+    } else if (period === "year" && /^\d{4}$/.test(dateStr)) {
+      const y = Number(dateStr);
+      start = `${y}-01-01 00:00:00`;
+      end = `${y + 1}-01-01 00:00:00`;
+    }
+
+    let query = `
+      WITH sales AS (
+        SELECT
+          g.id AS game_id,
+          g.title,
+          g.images,
+          g.category_name,
+          COALESCE(COUNT(oi.id), 0) AS purchases,  -- จำนวนการซื้อ
+          COALESCE(SUM(oi.unit_price), 0) AS revenue,  -- ยอดขายรวม
+          MIN(o.created_at) AS first_sale_at,
+          MAX(o.created_at) AS last_sale_at
+        FROM games g
+        LEFT JOIN order_items oi
+          ON oi.game_id = g.id
+        LEFT JOIN orders o
+          ON o.id = oi.order_id
+        WHERE o.created_at >= ? AND o.created_at < ?  -- กรองช่วงเวลาใน WHERE
+        GROUP BY g.id
+      ),
+      ranked AS (
+        SELECT
+          s.*,
+          RANK() OVER (ORDER BY s.purchases DESC, s.game_id ASC) AS rank_by_count  -- จัดอันดับจากจำนวนการซื้อ
+        FROM sales s
+      )
+      SELECT r.*, (SELECT COUNT(*) FROM sales) AS population
+      FROM ranked r
+      ORDER BY r.purchases DESC, r.game_id ASC  -- จัดเรียงจากจำนวนการซื้อ
+    `;
+
+    const params: any[] = start && end ? [start, end] : []; // Ensure that params are correctly set
+
+    const [rows] = await conn.query<RowDataPacket[]>(query, params);
+
+    const topSellers = rows.map((r: any, idx: number) => {
+      const rel = r.images ?? null; // คอลัมน์ชื่อ image
+      const imageUrl = rel ? toAbsoluteUrl(req, rel) : "default-image-url.jpg";
+      return {
+        rank: idx + 1,
+        gameId: r.game_id,
+        title: r.title ?? null,
+        image: rel, // เก็บ path เดิม
+        imageUrl, // full URL สำหรับแสดงผล
+        categoryName: r.category_name ?? null,
+        categories: csvToArray(r.category_name ?? ""),
+        purchases: Number(r.purchases ?? 0),
+        revenue: Number(r.revenue ?? 0), // ยอดขายรวม
+        firstSaleAt: r.first_sale_at ?? null,
+        lastSaleAt: r.last_sale_at ?? null,
+        period: start && end ? { start, end } : null,
+        rankByCount: r.rank_by_count, // อันดับจากจำนวนการซื้อ
+        population: r.population,
+      };
+    });
+
+    return res.json({ ok: true, topSellers });
+  } catch (e) {
+    console.error("Error fetching top sellers:", e);
+    return res.status(500).json({ ok: false, message: "Server error" });
+  }
+});

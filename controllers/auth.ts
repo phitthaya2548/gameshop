@@ -33,14 +33,14 @@ router.post("/", async (req, res) => {
       [email.toLowerCase()]
     );
 
-    // ✅ ตรวจสอบว่าพบ user หรือไม่
+
     if (!user) {
       return res
         .status(401)
         .json({ ok: false, message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
     }
 
-    // ✅ ตรวจสอบรหัสผ่าน
+
     const match = await bcrypt.compare(password, user.passwordHash);
     if (!match) {
       return res
@@ -48,7 +48,7 @@ router.post("/", async (req, res) => {
         .json({ ok: false, message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
     }
 
-    // ✅ สร้าง URL เต็มสำหรับ avatar
+
     const avatarUrl = toAbsoluteUrl(req, user.avatarUrl);
 
 
