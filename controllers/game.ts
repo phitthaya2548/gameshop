@@ -451,12 +451,15 @@ router.get("/games/:id", async (req, res) => {
     }
 
     // Retrieve game details from the database
-    const [rows] = await conn.query<RowDataPacket[]>(`
+    const [rows] = await conn.query<RowDataPacket[]>(
+      `
       SELECT id, title, price, category_name AS category_name, description, images, release_date AS releaseDate
       FROM games
       WHERE id = ? 
       LIMIT 1
-    `, [id]);
+    `,
+      [id]
+    );
 
     if (!rows.length) {
       return res.status(404).json({ ok: false, message: "Not Found" });
@@ -466,7 +469,8 @@ router.get("/games/:id", async (req, res) => {
     const imageUrl = toAbsoluteUrl(req, game.images);
 
     // Retrieve purchase stats for the game (number of purchases and revenue)
-    const [selfStatRows] = await conn.query<RowDataPacket[]>(`
+    const [selfStatRows] = await conn.query<RowDataPacket[]>(
+      `
       SELECT
         g.id AS game_id,
         COALESCE(COUNT(oi.id), 0) AS purchases,
@@ -476,7 +480,9 @@ router.get("/games/:id", async (req, res) => {
       LEFT JOIN orders o ON o.id = oi.order_id
       WHERE g.id = ?
       GROUP BY g.id
-    `, [id]);
+    `,
+      [id]
+    );
 
     const selfStat = selfStatRows[0] ?? {
       game_id: id,
@@ -499,8 +505,9 @@ router.get("/games/:id", async (req, res) => {
       });
     }
 
-    // Rank the games based on the number of purchases
-    const [rankRows] = await conn.query<RowDataPacket[]>(`
+    // Rank the games based on the number of purchases and revenue (for all games)
+    const [rankRows] = await conn.query<RowDataPacket[]>(
+      `
       WITH sales AS (
         SELECT
           g.id AS game_id,
@@ -516,14 +523,15 @@ router.get("/games/:id", async (req, res) => {
           game_id,
           purchases,
           revenue,
-          RANK() OVER (ORDER BY purchases DESC, revenue DESC, game_id ASC) AS rank_by_count  -- Rank by purchases
+          RANK() OVER (ORDER BY purchases DESC, revenue DESC, game_id ASC) AS rank_by_count
         FROM sales
       )
       SELECT r.*
       FROM ranked r
       WHERE r.game_id = ?
-      LIMIT 5;  -- Limit the result to top 5 games
-    `, [id]);
+    `,
+      [id]
+    );
 
     const rank = rankRows[0] ?? {
       rank_by_count: null,
@@ -532,9 +540,10 @@ router.get("/games/:id", async (req, res) => {
     };
 
     // If the game rank exceeds 5, show an empty string or skip the rank.
-    const ranking = rank.rank_by_count && rank.rank_by_count <= 5
-      ? Number(rank.rank_by_count)
-      : "";  // If rank is above 5, show empty
+    const ranking =
+      rank.rank_by_count && rank.rank_by_count <= 5
+        ? Number(rank.rank_by_count)
+        : ""; // If rank is above 5, show empty
 
     return res.json({
       id: game.id,
@@ -545,14 +554,13 @@ router.get("/games/:id", async (req, res) => {
       releaseDate: game.releaseDate ?? null,
       images: imageUrl ?? null,
       categories: csvToArray(game.category_name),
-      ranking,  // Show rank if available and not above 5
+      ranking, // Show rank if available and not above 5
     });
   } catch (e) {
     console.error("GET /games/:id error:", e);
     return res.status(500).json({ ok: false, message: "Server error" });
   }
 });
-
 
 router.get("/games", async (req, res) => {
   try {
@@ -577,74 +585,38 @@ router.get("/games", async (req, res) => {
 
 router.get("/stats/ranking", async (req, res) => {
   try {
-    const _mode = String(req.query.mode || "").toLowerCase();
-    const dateStr = String(req.query.date || "");
-    const by = req.query.by === "revenue" ? "revenue" : "count";
-    const fillZeros = String(req.query.fillZeros || "0") === "1";
+    const { period = "all", date = "" } = req.query;
+    const dateStr = String(date ?? "");
+    let start: string | null = null;
+    let end: string | null = null;
 
-    const limitReq = Number(req.query.limit) || 5;
-    const limit = Math.max(5, Math.min(limitReq, 100));
-
-    const rawCats =
-      (req.query as any).categories ?? 
-      (req.query as any).category ?? 
-      (req.query as any).categoryName;
-    const categories = normalizeCats(rawCats);
-
-    const isAll = !_mode || _mode === "all";
-    const mode = isAll ? "all" : _mode;
-
-    let range: { start: string; end: string } | null = null;
-    if (!isAll) {
-      range = calcRange(mode, dateStr);
-      if (!range) {
-        return res.status(400).json({
-          ok: false,
-          message:
-            "mode/date ไม่ถูกต้อง (mode=day|month|year, date ตามรูปแบบของ mode)",
-        });
-      }
+    // กำหนดช่วงเวลาให้กับแต่ละ period
+    if (period === "day" && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      start = `${dateStr} 00:00:00`;
+      const d = new Date(`${dateStr}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + 1);
+      end = d.toISOString().slice(0, 10) + " 00:00:00";
+    } else if (period === "month" && /^\d{4}-\d{2}$/.test(dateStr)) {
+      const [y, m] = dateStr.split("-").map(Number);
+      const startD = new Date(Date.UTC(y, m - 1, 1));
+      const endD = new Date(Date.UTC(y, m, 1));
+      start = startD.toISOString().slice(0, 10) + " 00:00:00";
+      end = endD.toISOString().slice(0, 10) + " 00:00:00";
+    } else if (period === "year" && /^\d{4}$/.test(dateStr)) {
+      const y = Number(dateStr);
+      start = `${y}-01-01 00:00:00`;
+      end = `${y + 1}-01-01 00:00:00`;
     }
 
-    // สร้าง WHERE/params สำหรับ filter หมวดหมู่ (เวลาถูกย้ายไปไว้ใน JOIN)
-    const conds: string[] = [];
-    const params: any[] = [];
-
-    if (categories.length) {
-      conds.push(
-        `(${categories
-          .map(() => `FIND_IN_SET(?, REPLACE(g.category_name, ', ', ','))`)
-          .join(" OR ")})`
-      );
-      params.push(...categories);
-    }
-    const whereSql = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
-
-    // ORDER หลักตาม "by"
-    const orderSQL =
-      by === "revenue"
-        ? `ORDER BY revenue DESC, purchases DESC, game_id ASC`
-        : `ORDER BY purchases DESC, revenue DESC, game_id ASC`;
-
-    // สร้างส่วนเงื่อนไขเวลาสำหรับ JOIN orders (ไม่ทำลาย LEFT JOIN)
-    const joinTimeSQL = !range
-      ? "" // ทั้งช่วงเวลา = ไม่กรองเวลา
-      : "AND (o.created_at >= ? AND o.created_at < ?)";
-
-    // params เวลาต้องต่อท้าย (ใช้ใน JOIN)
-    if (range) {
-      params.push(range.start, range.end);
-    }
-
-    const sql = `
+    // ถ้าเป็น period "all" ไม่ต้องกรองช่วงเวลา
+    let query = `
       WITH sales AS (
         SELECT
           g.id AS game_id,
           g.title,
           g.images,
           g.category_name,
-          g.price AS price,
-          COUNT(oi.id) AS purchases,  -- จำนวนการซื้อ
+          COALESCE(COUNT(oi.id), 0) AS purchases,  -- จำนวนการซื้อ
           COALESCE(SUM(oi.unit_price), 0) AS revenue,  -- ยอดขายรวม
           MIN(o.created_at) AS first_sale_at,
           MAX(o.created_at) AS last_sale_at
@@ -653,10 +625,10 @@ router.get("/stats/ranking", async (req, res) => {
           ON oi.game_id = g.id
         LEFT JOIN orders o
           ON o.id = oi.order_id
-          ${joinTimeSQL}                 -- เงื่อนไขเวลาอยู่ใน JOIN
-        ${whereSql}                      -- เงื่อนไขหมวดหมู่
+        ${
+          period !== "all" ? "WHERE o.created_at >= ? AND o.created_at < ?" : ""
+        }
         GROUP BY g.id
-        HAVING COUNT(oi.id) > 0          -- กรองเฉพาะเกมที่มียอดขาย (purchases > 0)
       ),
       ranked AS (
         SELECT
@@ -664,52 +636,42 @@ router.get("/stats/ranking", async (req, res) => {
           RANK() OVER (ORDER BY s.purchases DESC, s.game_id ASC) AS rank_by_count  -- จัดอันดับจากจำนวนการซื้อ
         FROM sales s
       )
-      SELECT *
-      FROM ranked
-      ${fillZeros ? "" : "WHERE purchases > 0"}   -- เลือกตัด 0 ออกหรือไม่
-      ${orderSQL}
-      LIMIT ${limit};
+      SELECT r.*, (SELECT COUNT(*) FROM sales) AS population
+      FROM ranked r
+      ORDER BY r.purchases DESC, r.game_id ASC  -- จัดเรียงจากจำนวนการซื้อ
     `;
 
-    const [rows] = await conn.query<RowDataPacket[]>(sql, params);
+    const params: any[] = period !== "all" && start && end ? [start, end] : []; // กำหนด params ถ้าเป็น period ที่มีการกรองเวลา
 
-    const items = rows.map((r, idx) => {
-      const imageUrl =
-        typeof toAbsoluteUrl === "function" ? toAbsoluteUrl(req, r.images) : r.images;
+    const [rows] = await conn.query<RowDataPacket[]>(query, params);
+
+    const topSellers = rows.map((r: any, idx: number) => {
+      const rel = r.images ?? null; // คอลัมน์ชื่อ image
+      const imageUrl = rel ? toAbsoluteUrl(req, rel) : "default-image-url.jpg";
       return {
         rank: idx + 1,
         gameId: r.game_id,
-        title: r.title,
-        price: Number(r.price ?? 0),
+        title: r.title ?? null,
+        image: rel, // เก็บ path เดิม
+        imageUrl, // full URL สำหรับแสดงผล
+        categoryName: r.category_name ?? null,
+        categories: csvToArray(r.category_name ?? ""),
         purchases: Number(r.purchases ?? 0),
         revenue: Number(r.revenue ?? 0), // ยอดขายรวม
-        categoryName: r.category_name,
-        categories: csvToArray(r.category_name),
-        image: r.images,
-        imageUrl,
-        firstSaleAt: r.first_sale_at,
-        lastSaleAt: r.last_sale_at,
-        period: range ? { start: range.start, end: range.end } : null,
-        rankByCount: r.rank_by_count,
+        firstSaleAt: r.first_sale_at ?? null,
+        lastSaleAt: r.last_sale_at ?? null,
+        period: start && end ? { start, end } : null,
+        rankByCount: r.rank_by_count, // อันดับจากจำนวนการซื้อ
+        population: r.population,
       };
     });
 
-    return res.json({
-      ok: true,
-      mode,
-      date: range ? dateStr : null,
-      by,
-      limit,
-      count: items.length,
-      items,
-    });
+    return res.json({ ok: true, topSellers });
   } catch (e) {
-    console.error("GET /admin/stats/ranking error:", e);
+    console.error("Error fetching top sellers:", e);
     return res.status(500).json({ ok: false, message: "Server error" });
   }
 });
-
-
 
 function calcRange(
   mode: string,
@@ -765,7 +727,7 @@ router.get("/top-sellers", async (req, res) => {
     let start: string | null = null;
     let end: string | null = null;
 
-    // สร้างช่วงเวลาแบบ [start, end) ครอบคลุมเต็มวัน/เดือน/ปี
+    
     if (period === "day" && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
       start = `${dateStr} 00:00:00`;
       const d = new Date(`${dateStr}T00:00:00Z`);
@@ -783,6 +745,7 @@ router.get("/top-sellers", async (req, res) => {
       end = `${y + 1}-01-01 00:00:00`;
     }
 
+
     let query = `
       WITH sales AS (
         SELECT
@@ -790,50 +753,50 @@ router.get("/top-sellers", async (req, res) => {
           g.title,
           g.images,
           g.category_name,
-          COALESCE(COUNT(oi.id), 0) AS purchases,  -- จำนวนการซื้อ
-          COALESCE(SUM(oi.unit_price), 0) AS revenue,  -- ยอดขายรวม
+          COALESCE(COUNT(oi.id), 0) AS purchases,
+          COALESCE(SUM(oi.unit_price), 0) AS revenue,
           MIN(o.created_at) AS first_sale_at,
           MAX(o.created_at) AS last_sale_at
         FROM games g
-        LEFT JOIN order_items oi
-          ON oi.game_id = g.id
-        LEFT JOIN orders o
-          ON o.id = oi.order_id
-        WHERE o.created_at >= ? AND o.created_at < ?  -- กรองช่วงเวลาใน WHERE
+        LEFT JOIN order_items oi ON oi.game_id = g.id
+        LEFT JOIN orders o ON o.id = oi.order_id
+        WHERE o.created_at >= ? AND o.created_at < ?
         GROUP BY g.id
       ),
       ranked AS (
         SELECT
           s.*,
-          RANK() OVER (ORDER BY s.purchases DESC, s.game_id ASC) AS rank_by_count  -- จัดอันดับจากจำนวนการซื้อ
+          RANK() OVER (ORDER BY s.purchases DESC, s.game_id ASC) AS rank_by_count
         FROM sales s
       )
       SELECT r.*, (SELECT COUNT(*) FROM sales) AS population
       FROM ranked r
-      ORDER BY r.purchases DESC, r.game_id ASC  -- จัดเรียงจากจำนวนการซื้อ
+      ORDER BY r.purchases DESC, r.game_id ASC;
     `;
 
-    const params: any[] = start && end ? [start, end] : []; // Ensure that params are correctly set
 
+    const params: any[] = start && end ? [start, end] : [];
+
+    // Ensure the parameters are passed correctly
     const [rows] = await conn.query<RowDataPacket[]>(query, params);
 
     const topSellers = rows.map((r: any, idx: number) => {
-      const rel = r.images ?? null; // คอลัมน์ชื่อ image
+      const rel = r.images ?? null; // Column name for image
       const imageUrl = rel ? toAbsoluteUrl(req, rel) : "default-image-url.jpg";
       return {
         rank: idx + 1,
         gameId: r.game_id,
         title: r.title ?? null,
-        image: rel, // เก็บ path เดิม
-        imageUrl, // full URL สำหรับแสดงผล
+        image: rel, // Keep the original path
+        imageUrl, // Full URL for display
         categoryName: r.category_name ?? null,
         categories: csvToArray(r.category_name ?? ""),
         purchases: Number(r.purchases ?? 0),
-        revenue: Number(r.revenue ?? 0), // ยอดขายรวม
+        revenue: Number(r.revenue ?? 0), // Total revenue
         firstSaleAt: r.first_sale_at ?? null,
         lastSaleAt: r.last_sale_at ?? null,
         period: start && end ? { start, end } : null,
-        rankByCount: r.rank_by_count, // อันดับจากจำนวนการซื้อ
+        rankByCount: r.rank_by_count, // Ranking based on purchases
         population: r.population,
       };
     });
