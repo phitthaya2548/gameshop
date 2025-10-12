@@ -31,20 +31,17 @@ exports.router.post("/", async (req, res) => {
       WHERE email = ?
       LIMIT 1
     `, [email.toLowerCase()]);
-        // ✅ ตรวจสอบว่าพบ user หรือไม่
         if (!user) {
             return res
                 .status(401)
                 .json({ ok: false, message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
         }
-        // ✅ ตรวจสอบรหัสผ่าน
         const match = await bcryptjs_1.default.compare(password, user.passwordHash);
         if (!match) {
             return res
                 .status(401)
                 .json({ ok: false, message: "อีเมลหรือรหัสผ่านไม่ถูกต้อง" });
         }
-        // ✅ สร้าง URL เต็มสำหรับ avatar
         const avatarUrl = (0, upload_1.toAbsoluteUrl)(req, user.avatarUrl);
         const payload = {
             id: user.id,

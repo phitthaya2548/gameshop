@@ -65,9 +65,8 @@ exports.router.get("/wallet/history", async (req, res) => {
     if (!auth)
         return res.status(401).json({ ok: false, message: "Unauthorized" });
     try {
-        // ดึงประวัติการทำรายการจากตาราง wallet_ledger
         const [rows] = await db_1.conn.query("SELECT * FROM wallet_ledger WHERE user_id = ? ORDER BY created_at DESC", [auth.id]);
-        return res.json(rows); // ส่งกลับรายการธุรกรรมทั้งหมด
+        return res.json(rows);
     }
     catch (e) {
         console.error("GET /wallet/history error:", e);
@@ -78,7 +77,6 @@ exports.router.post("/orders/buy", async (req, res) => {
     const auth = req.auth;
     if (!auth)
         return res.status(401).json({ ok: false, message: "Unauthorized" });
-    // 1) รับ input: รองรับทั้ง gameId เดี่ยว และ gameIds (array)
     let gameIds = Array.isArray(req.body?.gameIds)
         ? req.body.gameIds
         : [];
@@ -90,23 +88,21 @@ exports.router.post("/orders/buy", async (req, res) => {
     gameIds = (gameIds || [])
         .map((v) => Number(v))
         .filter((n) => Number.isFinite(n) && n > 0);
-    gameIds = Array.from(new Set(gameIds)); // กันส่งซ้ำเอง
+    gameIds = Array.from(new Set(gameIds));
     if (!gameIds.length) {
         return res
             .status(400)
             .json({ ok: false, message: "กรุณาระบุเกมที่ต้องการซื้อ" });
     }
-    // คูปอง (optional) — เราจะคิดเปอร์เซ็นต์เท่านั้น
     const couponCode = typeof req.body?.couponCode === "string" && req.body.couponCode.trim()
         ? req.body.couponCode.trim().toUpperCase()
         : undefined;
     const db = await db_1.conn.getConnection();
     try {
         await db.beginTransaction();
-        // 2) ล็อคผู้ใช้ ป้องกันแข่งกันตัดเงิน
         const [[me]] = await db.query(`SELECT id, role, wallet_balance
          FROM users
-        WHERE id = ?
+        WHERE id = ? 
         LIMIT 1
         FOR UPDATE`, [auth.id]);
         if (!me) {
@@ -119,7 +115,6 @@ exports.router.post("/orders/buy", async (req, res) => {
                 .status(403)
                 .json({ ok: false, message: "ต้องเป็นสมาชิก (user) ก่อนจึงจะซื้อได้" });
         }
-        // 3) ดึงราคาเกม
         const [games] = await db.query(`SELECT id, price
          FROM games
         WHERE id IN (?)`, [gameIds]);
@@ -133,10 +128,9 @@ exports.router.post("/orders/buy", async (req, res) => {
                 notFoundIds: notFound,
             });
         }
-        // 4) กันซื้อซ้ำ (ผู้ใช้ห้ามมีเกมเดิมอยู่แล้ว)
         const [owned] = await db.query(`SELECT game_id
          FROM order_items
-        WHERE user_id = ?
+        WHERE user_id = ? 
           AND game_id IN (?)`, [me.id, gameIds]);
         if (owned.length) {
             await db.rollback();
@@ -146,23 +140,19 @@ exports.router.post("/orders/buy", async (req, res) => {
                 alreadyOwnedIds: owned.map((r) => Number(r.game_id)),
             });
         }
-        // 5) รวมราคาเต็มก่อนหักส่วนลด
         const totalBefore = games.reduce((sum, g) => sum + Number(g.price || 0), 0);
-        // 6) ส่วนลดแบบเปอร์เซ็นต์เท่านั้น (ไม่เช็ควันหมดอายุ/สถานะ)
         let discountCodeId = null;
         let discountAmount = 0;
         if (couponCode) {
-            // ล็อคคูปอง
             const [[dc]] = await db.query(`SELECT id, code, value, total_quota, used_count, per_user_limit
            FROM discount_codes
-          WHERE code = ?
+          WHERE code = ? 
           LIMIT 1
           FOR UPDATE`, [couponCode]);
             if (!dc) {
                 await db.rollback();
                 return res.status(404).json({ ok: false, message: "ไม่พบโค้ดส่วนลด" });
             }
-            // ถ้าใช้ครบโควตาแล้ว -> ลบทันที และแจ้ง
             if (Number(dc.used_count) >= Number(dc.total_quota)) {
                 await db.query(`DELETE FROM discount_codes WHERE id = ?`, [dc.id]);
                 await db.rollback();
@@ -171,7 +161,6 @@ exports.router.post("/orders/buy", async (req, res) => {
                     message: "โค้ดนี้ใช้ครบโควตาแล้ว และถูกลบออกจากระบบแล้ว",
                 });
             }
-            // จำกัดสิทธิ์ต่อผู้ใช้ (ค่า default 1)
             const [countUsed] = await db.query(`SELECT COUNT(*) AS cnt
            FROM orders
           WHERE user_id = ? AND discount_code_id = ?`, [me.id, dc.id]);
@@ -183,14 +172,12 @@ exports.router.post("/orders/buy", async (req, res) => {
                     .status(409)
                     .json({ ok: false, message: "คุณใช้โค้ดนี้ครบสิทธิ์แล้ว" });
             }
-            // ✅ คิดเป็นเปอร์เซ็นต์เท่านั้น (0-100)
             const percent = Math.max(0, Math.min(100, Number(dc.value) || 0));
             discountAmount = +(totalBefore * (percent / 100)).toFixed(2);
             discountAmount = Math.min(discountAmount, totalBefore);
             discountCodeId = Number(dc.id);
         }
         const totalPaid = +(totalBefore - discountAmount).toFixed(2);
-        // 7) เงินพอไหม
         const wallet = Number(me.wallet_balance || 0);
         if (wallet < totalPaid) {
             await db.rollback();
@@ -201,12 +188,10 @@ exports.router.post("/orders/buy", async (req, res) => {
                 currentBalance: wallet,
             });
         }
-        // 8) สร้าง order
         const [orderRs] = await db.query(`INSERT INTO orders
-         (user_id, total_before, discount_code_id, discount_amount, total_paid)
-       VALUES (?, ?, ?, ?, ?)`, [me.id, totalBefore, discountCodeId, discountAmount, totalPaid]);
+         (user_id, total_before, discount_code_id, discount_amount, total_paid, created_at)
+       VALUES (?, ?, ?, ?, ?, CONVERT_TZ(NOW(), '+00:00', '+07:00'))`, [me.id, totalBefore, discountCodeId, discountAmount, totalPaid]);
         const orderId = orderRs.insertId;
-        // 9) เพิ่มรายการเกม
         const placeholders = games.map(() => "(?,?,?,?)").join(",");
         const params = [];
         for (const g of games) {
@@ -214,7 +199,6 @@ exports.router.post("/orders/buy", async (req, res) => {
         }
         await db.query(`INSERT INTO order_items (order_id, user_id, game_id, unit_price)
        VALUES ${placeholders}`, params);
-        // 10) ตัดเงิน + ลงเล่มบัญชี
         const newBalance = +(wallet - totalPaid).toFixed(2);
         await db.query(`UPDATE users SET wallet_balance = ? WHERE id = ?`, [
             newBalance,
@@ -227,14 +211,12 @@ exports.router.post("/orders/buy", async (req, res) => {
             newBalance,
             `ซื้อ ${games.length} เกม${couponCode ? " (ใช้โค้ด " + couponCode + ")" : ""}`,
         ]);
-        // 11) นับใช้คูปอง + ลบทันทีถ้าเต็มหลังเพิ่ม
         if (discountCodeId) {
             const [aff] = await db.query(`UPDATE discount_codes
             SET used_count = used_count + 1
-          WHERE id = ?
+          WHERE id = ? 
             AND used_count < total_quota`, [discountCodeId]);
             if (!aff.affectedRows) {
-                // มีคนอื่นใช้จนเต็มพอดี -> ลบทิ้งและ rollback
                 await db.query(`DELETE FROM discount_codes WHERE id = ?`, [
                     discountCodeId,
                 ]);
@@ -244,7 +226,6 @@ exports.router.post("/orders/buy", async (req, res) => {
                     message: "โค้ดนี้ถูกใช้ครบโควตาพอดี กรุณาลองใหม่",
                 });
             }
-            // เช็คอีกครั้ง ถ้าเต็มแล้วให้ลบออกเพื่อเคลียร์
             const [[after]] = await db.query(`SELECT used_count, total_quota FROM discount_codes WHERE id = ?`, [discountCodeId]);
             if (after && Number(after.used_count) >= Number(after.total_quota)) {
                 await db.query(`DELETE FROM discount_codes WHERE id = ?`, [
@@ -269,7 +250,6 @@ exports.router.post("/orders/buy", async (req, res) => {
     catch (e) {
         await db.rollback();
         if (e?.code === "ER_DUP_ENTRY") {
-            // กันชน UNIQUE user_id+game_id
             return res.status(409).json({
                 ok: false,
                 message: "มีบางเกมเป็นเจ้าของอยู่แล้ว ไม่สามารถซื้อซ้ำได้",
@@ -288,31 +268,25 @@ exports.router.post("/balance", async (req, res) => {
         return res.status(401).json({ ok: false, message: "Unauthorized" });
     const raw = req.body?.amount;
     const amount = Number(raw);
-    // ต้องเป็นตัวเลขบวก
     if (!Number.isFinite(amount) || amount <= 0) {
         return res.status(400).json({ ok: false, message: "Invalid amount" });
     }
-    // ปัดให้ชัดเจน 2 ตำแหน่ง (กันเศษทศนิยมลอย)
     const topup = +amount.toFixed(2);
     const note = String(req.body?.note ?? "เติมเงิน").slice(0, 255);
     const cx = await db_1.conn.getConnection();
     try {
         await cx.beginTransaction();
-        // ล็อคแถวผู้ใช้ กันแข่งกันอัปเดต
         const [[user]] = await cx.query("SELECT id, wallet_balance FROM users WHERE id = ? FOR UPDATE", [auth.id]);
         if (!user) {
             await cx.rollback();
             return res.status(404).json({ ok: false, message: "User not found" });
         }
-        // MySQL DECIMAL -> string, แปลงเป็น number ก่อนคำนวณ
         const current = Number(user.wallet_balance ?? 0);
         const newBalance = +(current + topup).toFixed(2);
-        // อัปเดตยอดกระเป๋า
         await cx.query("UPDATE users SET wallet_balance = ? WHERE id = ?", [
             newBalance,
             auth.id,
         ]);
-        // ลงสมุดบัญชี (TOPUP เป็นจำนวนบวก)
         await cx.query(`INSERT INTO wallet_ledger (user_id, type, amount, balance_after, note)
        VALUES (?, 'TOPUP', ?, ?, ?)`, [auth.id, topup, newBalance, note]);
         await cx.commit();
@@ -335,7 +309,6 @@ exports.router.put("/", upload_1.upload.single("avatar"), async (req, res) => {
         let { username, email, oldPassword, newPassword } = req.body ?? {};
         const sets = [];
         const params = [];
-        // username
         if (username !== undefined) {
             username = String(username).trim();
             if (username.length < 2 || username.length > 50)
@@ -345,7 +318,6 @@ exports.router.put("/", upload_1.upload.single("avatar"), async (req, res) => {
             sets.push("username = ?");
             params.push(username);
         }
-        // email
         if (email !== undefined) {
             email = String(email).trim().toLowerCase();
             const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -359,14 +331,12 @@ exports.router.put("/", upload_1.upload.single("avatar"), async (req, res) => {
             sets.push("email = ?");
             params.push(email);
         }
-        // avatar (ไฟล์จริงจาก multer)
-        const file = req.file; // Express.Multer.File | undefined
+        const file = req.file;
         if (file) {
             const relPath = (0, upload_1.saveImageBufferToUploads)(file.buffer, file.mimetype);
             sets.push("avatar_url = ?");
             params.push(relPath);
         }
-        // เปลี่ยนรหัสผ่าน (ถ้าส่งมาเป็นคู่)
         if (oldPassword !== undefined || newPassword !== undefined) {
             if (typeof oldPassword !== "string" ||
                 typeof newPassword !== "string" ||
@@ -464,15 +434,17 @@ ORDER BY ci.id DESC
 });
 exports.router.post("/cart/add", async (req, res) => {
     const auth = req.auth;
-    if (!auth)
+    // Check if user is authenticated
+    if (!auth) {
         return res.status(401).json({ ok: false, message: "Unauthorized" });
-    // ⛔ บล็อก admin
+    }
     try {
         let role = auth.role;
         if (!role) {
             const [[u]] = await db_1.conn.query("SELECT role FROM users WHERE id=? LIMIT 1", [auth.id]);
-            if (!u)
+            if (!u) {
                 return res.status(401).json({ ok: false, message: "Unauthorized" });
+            }
             role = u.role;
         }
         if (role === "admin") {
@@ -483,15 +455,13 @@ exports.router.post("/cart/add", async (req, res) => {
         }
     }
     catch (e) {
-        console.error("role check error:", e);
+        console.error("Role check error:", e);
         return res.status(500).json({ ok: false, message: "Server error" });
     }
     const gameId = Number(req.body?.gameId);
     if (!Number.isFinite(gameId) || gameId <= 0) {
         return res.status(400).json({ ok: false, message: "Invalid gameId" });
     }
-    // ✅ คำสั่งเดียวจบ: แทรกเมื่อมีเกมอยู่จริงและยังไม่เป็นเจ้าของ
-    //    ถ้ามีในตะกร้าแล้ว → บวก 1 (เพดาน 99)
     const sql = `
     INSERT INTO cart_items (user_id, game_id, qty)
     SELECT ?, ?, 1
@@ -502,18 +472,17 @@ exports.router.post("/cart/add", async (req, res) => {
       qty = CASE WHEN qty < 99 THEN qty + 1 ELSE qty END
   `;
     const params = [auth.id, gameId, gameId, auth.id, gameId];
-    // retry เบา ๆ เฉพาะ lock/deadlock
     const execWithRetry = async (tries = 3) => {
         let n = 0;
         for (;;) {
             try {
-                const [r] = await db_1.conn.execute(sql, params); // ใช้ pool ตรง ๆ
+                const [r] = await db_1.conn.execute(sql, params);
                 return r;
             }
             catch (e) {
                 if ((e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") &&
                     n < tries) {
-                    await new Promise((r) => setTimeout(r, 60 * Math.pow(2, n))); // 60 → 120 → 240ms
+                    await new Promise((r) => setTimeout(r, 60 * Math.pow(2, n)));
                     n++;
                     continue;
                 }
@@ -523,14 +492,10 @@ exports.router.post("/cart/add", async (req, res) => {
     };
     try {
         const result = await execWithRetry();
-        // semantics:
-        // - insert ใหม่ => affectedRows = 1
-        // - duplicate → update => affectedRows = 2 (changedRows บอกว่าเพิ่ม qty สำเร็จไหม)
         if (result.affectedRows === 1) {
             return res.json({ ok: true, message: "เพิ่มลงตะกร้าแล้ว" });
         }
         if (result.affectedRows === 2) {
-            // ถ้า qty เดิม = 99, CASE จะไม่เปลี่ยนค่า → changedRows = 0
             if (typeof result.changedRows === "number" && result.changedRows === 0) {
                 return res.json({
                     ok: true,
@@ -539,7 +504,6 @@ exports.router.post("/cart/add", async (req, res) => {
             }
             return res.json({ ok: true, message: "เพิ่มจำนวนเกมในตะกร้าแล้ว" });
         }
-        // affectedRows = 0 → guard ไม่ผ่าน (หาเหตุผลแจ้งผู้ใช้)
         const [[g]] = await db_1.conn.query("SELECT id FROM games WHERE id=? LIMIT 1", [gameId]);
         if (!g)
             return res.status(404).json({ ok: false, message: "ไม่พบเกม" });
@@ -550,21 +514,22 @@ exports.router.post("/cart/add", async (req, res) => {
                 message: "คุณเป็นเจ้าของเกมนี้แล้ว ไม่สามารถเพิ่มในตะกร้าได้",
             });
         }
-        return res
-            .status(409)
-            .json({ ok: false, message: "ไม่สามารถเพิ่มสินค้าลงตะกร้าได้" });
+        return res.status(409).json({
+            ok: false,
+            message: "ไม่สามารถเพิ่มสินค้าลงตะกร้าได้",
+        });
     }
     catch (e) {
         if (e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") {
-            return res
-                .status(409)
-                .json({ ok: false, message: "ระบบไม่พร้อม โปรดลองอีกครั้ง" });
+            return res.status(409).json({
+                ok: false,
+                message: "ระบบไม่พร้อม โปรดลองอีกครั้ง",
+            });
         }
         console.error("POST /cart/add error:", e);
         return res.status(500).json({ ok: false, message: "Server error" });
     }
 });
-// DELETE /cart/:gameId – ไม่ตั้งค่า lock เอง, single statement, มี retry
 exports.router.delete("/cart/:gameId", async (req, res) => {
     const auth = req.auth;
     if (!auth)
@@ -576,39 +541,42 @@ exports.router.delete("/cart/:gameId", async (req, res) => {
     const sql = `DELETE FROM cart_items WHERE user_id=? AND game_id=? LIMIT 1`;
     const params = [auth.id, gameId];
     try {
-        // retry สั้น ๆ เฉพาะกรณีชน lock/deadlock
-        const execWithRetry = async (tries = 3) => {
-            let n = 0;
-            for (;;) {
-                try {
-                    const [r] = await db_1.conn.execute(sql, params); // ใช้ pool ตรง ๆ ไม่ต้อง getConnection()
-                    return r; // ต้อง return
-                }
-                catch (e) {
-                    if ((e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") &&
-                        n < tries) {
-                        await new Promise((r) => setTimeout(r, 60 * Math.pow(2, n))); // 60ms → 120ms → 240ms
-                        n++;
-                        continue;
-                    }
-                    throw e;
-                }
-            }
-        };
-        const result = await execWithRetry();
-        if (!result.affectedRows) {
-            return res
-                .status(404)
-                .json({ ok: false, message: "ไม่พบรายการในตะกร้า" });
+        const [result] = await db_1.conn.execute(sql, params);
+        // ตรวจสอบว่ามีการลบสินค้า
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ ok: false, message: "ไม่พบรายการในตะกร้า" });
         }
-        return res.json({ ok: true, message: "ลบออกจากตะกร้าแล้ว" });
+        // รีเฟรชข้อมูลตะกร้า
+        const sqlFetchUpdatedCart = `
+      SELECT
+        ci.game_id AS gameId,
+        COALESCE(ci.qty, 1) AS qty,
+        g.title,
+        g.price,
+        g.images,
+        g.category_name,
+        g.description,
+        g.release_date
+      FROM cart_items ci
+      JOIN games g ON g.id = ci.game_id
+      WHERE ci.user_id = ?
+      ORDER BY ci.id DESC
+    `;
+        const [updatedRows] = await db_1.conn.query(sqlFetchUpdatedCart, [auth.id]);
+        const items = updatedRows.map((r) => ({
+            gameId: Number(r.gameId),
+            qty: Number(r.qty || 1),
+            title: r.title,
+            price: Number(r.price || 0),
+            image: (0, upload_1.toAbsoluteUrl)(req, r.images) || null,
+            categoryName: r.category_name,
+            description: r.description,
+            releaseDate: r.release_date,
+        }));
+        const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
+        return res.json({ ok: true, message: "ลบออกจากตะกร้าแล้ว", items, subtotal });
     }
     catch (e) {
-        if (e?.code === "ER_LOCK_WAIT_TIMEOUT" || e?.code === "ER_DEADLOCK") {
-            return res
-                .status(409)
-                .json({ ok: false, message: "ระบบไม่พร้อม โปรดลองอีกครั้ง" });
-        }
         console.error("DELETE /cart/:gameId error:", e);
         return res.status(500).json({ ok: false, message: "Server error" });
     }
@@ -634,22 +602,40 @@ exports.router.get("/mygames", async (req, res) => {
     if (!auth)
         return res.status(401).json({ ok: false, message: "Unauthorized" });
     try {
-        // หมายเหตุ: ปกติคุณกันซื้อซ้ำไว้แล้ว จึง 1 เกมจะมีได้แค่ครั้งเดียว
+        // ดึงข้อมูลยอดรวมรายได้และเกมที่ผู้ใช้ซื้อ
         const sql = `
+      WITH sales AS (
+        SELECT
+          g.id AS game_id,
+          COALESCE(SUM(oi.unit_price), 0) AS revenue
+        FROM games g
+        LEFT JOIN order_items oi ON oi.game_id = g.id
+        LEFT JOIN orders o ON o.id = oi.order_id
+        GROUP BY g.id
+      ),
+      mine AS (
+        SELECT
+          oi.game_id,
+          MAX(o.created_at) AS purchasedAt
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        WHERE o.user_id = ?
+        GROUP BY oi.game_id
+      )
       SELECT
-        oi.game_id               AS gameId,
+        m.game_id              AS gameId,
         g.title,
         g.price,
-        g.category_name          AS categoryName,
+        g.category_name        AS categoryName,
         g.description,
-        g.release_date           AS releaseDate,
-        g.images,                              -- เก็บเป็น path/URL
-        o.created_at             AS purchasedAt
-      FROM order_items oi
-      JOIN orders o ON o.id = oi.order_id
-      JOIN games  g ON g.id = oi.game_id
-      WHERE o.user_id = ?
-      ORDER BY o.created_at DESC, oi.id DESC
+        g.release_date         AS releaseDate,
+        g.images,
+        m.purchasedAt,
+        s.revenue
+      FROM mine m
+      JOIN games g ON g.id = m.game_id
+      LEFT JOIN sales s ON s.game_id = m.game_id
+      ORDER BY m.purchasedAt DESC; -- ลบ LIMIT 5 ออก เพื่อแสดงทั้งหมด
     `;
         const [rows] = await db_1.conn.query(sql, [auth.id]);
         const purchases = rows.map((r) => ({
@@ -660,18 +646,17 @@ exports.router.get("/mygames", async (req, res) => {
             description: r.description ?? null,
             releaseDate: r.releaseDate ?? null,
             purchasedAt: r.purchasedAt ?? null,
-            image: r.images ? (0, upload_1.toAbsoluteUrl)(req, r.images) : null, // แปลงเป็น absolute URL
+            image: r.images ? (0, upload_1.toAbsoluteUrl)(req, r.images) : null,
+            revenue: Number(r.revenue ?? 0),
         }));
-        // ไม่ต้องเช็ค length ฝั่งเซิร์ฟเวอร์ — ส่ง array กลับไปตรง ๆ
-        // ฝั่ง Client จะเช็คว่ามี array ว่างหรือไม่เพื่อแสดง "ยังไม่มีเกม"
         return res.json({
             ok: true,
-            count: purchases.length, // เผื่อ UI ใช้นับจำนวน
+            count: purchases.length,
             purchases,
         });
     }
     catch (e) {
-        console.error("GET /orders/my-games error:", e);
+        console.error("GET /mygames error:", e);
         return res.status(500).json({ ok: false, message: "Server error" });
     }
 });

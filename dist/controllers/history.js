@@ -60,18 +60,17 @@ exports.router.get("/wallet/search", async (req, res) => {
         if (rows.length === 0) {
             return res.status(404).json({ ok: false, message: "User not found" });
         }
-        // Map the user data into the required format
         const users = rows.map((user) => ({
             id: user.id,
             username: user.username,
             email: user.email,
             role: user.role,
-            walletBalance: Number(user.wallet_balance ?? 0), // Ensuring wallet_balance is a number
-            avatarUrl: (0, upload_1.toAbsoluteUrl)(req, user.avatar_url), // Assuming `toAbsoluteUrl` is a function that converts the relative URL to absolute
+            walletBalance: Number(user.wallet_balance ?? 0),
+            avatarUrl: (0, upload_1.toAbsoluteUrl)(req, user.avatar_url),
         }));
         return res.json({
             ok: true,
-            users, // Return all matched users
+            users,
         });
     }
     catch (error) {
@@ -81,14 +80,11 @@ exports.router.get("/wallet/search", async (req, res) => {
 });
 exports.router.get("/wallet/users", async (req, res) => {
     try {
-        // Fetch all users from the database
         const [users] = await db_1.conn.query(`SELECT id, username, email, role, wallet_balance, avatar_url 
            FROM users`);
-        // If no users are found
         if (users.length === 0) {
             return res.status(404).json({ ok: false, message: "No users found" });
         }
-        // Return the list of users
         res.json({
             ok: true,
             users: users.map((user) => ({
