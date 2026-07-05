@@ -11,4 +11,15 @@ export const conn = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
 });
+
+// debug: ทดสอบ connect ทันทีตอน start
+conn.getConnection()
+  .then((c) => {
+    console.log("✅ DB connected");
+    c.release();
+  })
+  .catch((err) => {
+    console.error("❌ DB connection failed:", err.message);
+  });
+
 export type DBPool = typeof conn;
