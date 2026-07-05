@@ -16,7 +16,7 @@ export const app = express();
 app.use(
   cors({
     origin: "https://gameshop-25ede.web.app",
-    credentials: true, 
+    credentials: true, //
   })
 );
 app.use(express.json({ limit: "80mb" }));
