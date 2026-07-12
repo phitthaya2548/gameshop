@@ -1,77 +1,142 @@
+# 🎮 GameShop Backend
 
-# Demowebgame
+REST API Backend สำหรับระบบร้านขายเกม (Game Store) พัฒนาด้วย **Node.js + Express + TypeScript** เชื่อมต่อฐานข้อมูล **MySQL** รองรับระบบสมาชิก, กระเป๋าเงิน (Wallet), ตะกร้าสินค้า, คูปองส่วนลด, และระบบจัดการเกมสำหรับแอดมิน
 
-โปรเจกต์เว็บไซต์ร้านค้าเกมออนไลน์ ทำเป็นโปรเจกต์ฝึกฝนตอนเรียน ใช้ Angular ทำฝั่ง Frontend
+---
 
-เว็บนี้แบ่งเป็น 2 ส่วนคือฝั่งลูกค้า (user) กับฝั่งแอดมิน โดยลูกค้าสามารถเข้ามาดูเกม เติมเงินเข้ากระเป๋า ซื้อเกม ดูเกมที่ซื้อไปแล้วในคลังของตัวเอง ส่วนแอดมินจะจัดการเพิ่ม/แก้/ลบเกม จัดการส่วนลด และดูข้อมูลผู้ใช้ในระบบได้
+## ✨ ฟีเจอร์หลัก
 
-## ฟีเจอร์หลักๆ
+- 🔐 **Authentication** – ระบบล็อกอิน/สมัครสมาชิก เข้ารหัสรหัสผ่านด้วย bcrypt และยืนยันตัวตนด้วย JWT
+- 🎮 **จัดการเกม** – เพิ่ม/แก้ไข/ลบ/ค้นหาเกม พร้อมอัปโหลดรูปปก, หมวดหมู่เกม, สถิติยอดขาย และเกมขายดี (Top Sellers)
+- 🛒 **ตะกร้าสินค้า** – เพิ่ม/ลบสินค้าในตะกร้า และ checkout เพื่อสั่งซื้อ
+- 💰 **ระบบกระเป๋าเงิน (Wallet)** – เติมเงิน, ดูยอดคงเหลือ, ประวัติธุรกรรม (ledger)
+- 🎟️ **คูปองส่วนลด** – สร้าง/แก้ไข/ลบ/ใช้โค้ดส่วนลด พร้อมระบบโควตาการใช้งาน
+- 📦 **ประวัติการซื้อ** – ดูประวัติคำสั่งซื้อและเกมที่เป็นเจ้าของ (My Games)
+- 🖼️ **อัปโหลดรูปภาพ** – รองรับอัปโหลดรูปโปรไฟล์และรูปปกเกม (jpeg, png, webp) ด้วย Multer
+- 👤 **จัดการโปรไฟล์ผู้ใช้** – ดู/แก้ไขข้อมูลส่วนตัวและรูปโปรไฟล์
 
-ฝั่ง user
-- สมัครสมาชิก/ล็อกอิน (อัปโหลดรูปโปรไฟล์ได้)
-- ดูเกมทั้งหมด ค้นหาเกม ดูรายละเอียดเกม
-- เติมเงิน + ดูประวัติการเติมเงิน
-- ใส่ตะกร้าแล้วสั่งซื้อ
-- คลังเกมของตัวเอง (เกมที่ซื้อไปแล้ว)
-- หน้าแรงกิ้ง
-- แก้ไขโปรไฟล์
+---
 
-ฝั่ง admin
-- เพิ่ม/แก้/ลบเกม
-- จัดการโปรโมชั่น/ส่วนลด
-- ดูสินค้าขายดี
-- ค้นประวัติผู้ใช้ + ประวัติกระเป๋าเงินของแต่ละคน
+## 🛠️ เทคโนโลยีที่ใช้
 
-ระบบล็อกอินใช้ JWT เก็บ token ไว้ แล้วมี guard เช็ค role ว่าเป็น user หรือ admin ถึงจะเข้าหน้านั้นๆ ได้
+| หมวดหมู่ | เทคโนโลยี |
+|---|---|
+| Runtime | [Node.js](https://nodejs.org) + [TypeScript](https://www.typescriptlang.org) |
+| Web Framework | [Express 5](https://expressjs.com) |
+| ฐานข้อมูล | [MySQL](https://www.mysql.com) ผ่าน [mysql2](https://www.npmjs.com/package/mysql2) |
+| Authentication | [jsonwebtoken](https://www.npmjs.com/package/jsonwebtoken), [express-jwt](https://www.npmjs.com/package/express-jwt), [bcryptjs](https://www.npmjs.com/package/bcryptjs) |
+| Validation | [zod](https://zod.dev) |
+| อัปโหลดไฟล์ | [multer](https://www.npmjs.com/package/multer) |
+| Security / อื่น ๆ | [helmet](https://helmetjs.github.io), [cors](https://www.npmjs.com/package/cors), [cookie-parser](https://www.npmjs.com/package/cookie-parser), [express-session](https://www.npmjs.com/package/express-session), [dotenv](https://www.npmjs.com/package/dotenv) |
+| ORM (พร้อมใช้งาน) | [Prisma](https://www.prisma.io) |
+| Dev Tools | ts-node-dev, tsx, nodemon |
 
-## ใช้อะไรทำบ้าง
+---
 
-- Angular 20
-- Angular Material + Lucide icon
-- SCSS
-- RxJS
-- Firebase Hosting (ตอน deploy)
-
-โปรเจกต์นี้เป็นฝั่ง frontend อย่างเดียว ต้องมี backend API รันคู่กันด้วย (ตั้งค่า url ได้ที่ `src/app/config/constants.ts`)
-
-## โครงสร้างไฟล์คร่าวๆ
+## 📂 โครงสร้างโปรเจกต์
 
 ```
-src/app/
-├── components/
-│   ├── home, header, login, register, gamedetail
-│   └── pages/
-│       ├── user/   -> โปรไฟล์, กระเป๋าเงิน, ตะกร้า, คลังเกม, แรงกิ้ง
-│       └── admin/  -> จัดการเกม, ส่วนลด, สถิติ, ผู้ใช้
-├── core/       -> guard กับ interceptor
-├── models/     -> type ต่างๆ
-├── services/   -> เรียก api
-└── config/     -> เก็บ api endpoint
+.
+├── app.ts                    # ตั้งค่า Express app, middleware, routes
+├── server.ts                 # entry point เริ่ม HTTP server
+├── db.ts                     # การเชื่อมต่อฐานข้อมูล MySQL (connection pool)
+├── controllers/
+│   ├── auth.ts                # เข้าสู่ระบบ (login)
+│   ├── register.ts            # สมัครสมาชิก
+│   ├── user.ts                # โปรไฟล์, wallet, ตะกร้า, checkout, my games
+│   ├── game.ts                # จัดการเกม (CRUD), ค้นหา, ranking, top sellers
+│   ├── coupon.ts               # จัดการคูปอง/โค้ดส่วนลด
+│   ├── history.ts             # ประวัติธุรกรรม/wallet ledger
+│   └── upload.ts              # ฟังก์ชันจัดการอัปโหลดรูปภาพ (multer)
+├── middlewares/
+│   └── jws.ts                 # JWT authentication middleware
+└── uploads/                   # โฟลเดอร์เก็บไฟล์รูปที่อัปโหลด
 ```
 
-## วิธีรัน
+---
 
-ติดตั้งของก่อน
+## 🔌 API Endpoints
+
+| Method | Endpoint | คำอธิบาย |
+|---|---|---|
+| `POST` | `/login` | เข้าสู่ระบบ |
+| `POST` | `/register` | สมัครสมาชิก (แนบรูป avatar ได้) |
+| `GET` | `/me` | ดูข้อมูลโปรไฟล์ตนเอง |
+| `PUT` | `/me` | แก้ไขโปรไฟล์ (แนบรูป avatar ได้) |
+| `GET` | `/me/balance` | ดูยอดเงินคงเหลือ |
+| `POST` | `/me/balance` | เติมเงินเข้ากระเป๋า |
+| `GET` | `/me/wallet/history` | ประวัติการทำธุรกรรม |
+| `GET` | `/me/cart` | ดูตะกร้าสินค้า |
+| `POST` | `/me/cart/add` | เพิ่มเกมลงตะกร้า |
+| `DELETE` | `/me/cart/:gameId` | ลบเกมออกจากตะกร้า |
+| `POST` | `/me/checkout` | ชำระเงิน/สั่งซื้อ |
+| `POST` | `/me/orders/buy` | ซื้อเกมทันที |
+| `GET` | `/me/mygames` | รายการเกมที่เป็นเจ้าของ |
+| `GET` | `/admin/games` | รายการเกมทั้งหมด |
+| `GET` | `/admin/games/:id` | รายละเอียดเกม |
+| `POST` | `/admin/addgames` | เพิ่มเกมใหม่ (แนบรูปปก) |
+| `PATCH` | `/admin/games/:id` | แก้ไขเกม |
+| `DELETE` | `/admin/games/:id` | ลบเกม |
+| `GET` | `/admin/search` | ค้นหาเกม |
+| `GET` | `/admin/stats/ranking` | สถิติยอดขาย |
+| `GET` | `/admin/top-sellers` | เกมขายดี |
+| `POST` | `/coupon/create/discount` | สร้างโค้ดส่วนลด |
+| `POST` | `/coupon/apply/discount` | ใช้โค้ดส่วนลด |
+| `PATCH` | `/coupon/update/discount/:id` | แก้ไขโค้ดส่วนลด |
+| `DELETE` | `/coupon/delete/discount/:id` | ลบโค้ดส่วนลด |
+| `GET` | `/coupon/list/discount` | รายการโค้ดส่วนลดทั้งหมด |
+| `GET` | `/history/wallet/ledger/:userId` | ประวัติธุรกรรม wallet ของผู้ใช้ |
+| `GET` | `/history/wallet/search` | ค้นหาธุรกรรม |
+| `GET` | `/history/wallet/users` | รายชื่อผู้ใช้ (สำหรับแอดมิน) |
+
+> หมายเหตุ: ทุก endpoint ยกเว้น `/register`, `/login` และ `GET /uploads/*` ต้องแนบ JWT token (`Authorization: Bearer <token>`)
+
+---
+
+## 🚀 การติดตั้งและเริ่มใช้งาน
+
+### สิ่งที่ต้องมี
+- [Node.js](https://nodejs.org) เวอร์ชัน 18 ขึ้นไป
+- ฐานข้อมูล [MySQL](https://www.mysql.com)
+
+### ขั้นตอน
+
 ```bash
+# 1) โคลนโปรเจกต์
+git clone https://github.com/<username>/gameshop.git
+cd gameshop
+
+# 2) ติดตั้ง dependencies
 npm install
+
+# 3) สร้างไฟล์ .env ที่ root แล้วตั้งค่าตัวแปรดังนี้
 ```
 
-รันตอน dev
+```env
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=root
+DB_PASS=your_password
+DB_NAME=gameshop
+JWT_SECRET=your_jwt_secret
+port=3000
+```
+
 ```bash
-ng serve
-```
-แล้วเข้า `http://localhost:4200/`
+# 4) รันโหมดพัฒนา (auto-reload)
+npm run dev
+# หรือ
+npm run start:dev
 
-build ตอนจะเอาไป deploy จริง
-```bash
-ng build
-```
-
-ถ้าจะ deploy ขึ้น Firebase
-```bash
-firebase deploy
+# 5) Build และรันโปรดักชัน
+npm run build
+npm start
 ```
 
-## หมายเหตุ
+เมื่อรันสำเร็จ server จะพร้อมใช้งานที่ `http://localhost:3000`
 
-แก้ path api ให้ตรงกับ backend ที่รันอยู่ก่อนใช้งานจริง ไม่งั้นดึงข้อมูลไม่ได้
+---
+
+## 📄 License
+
+ISC
